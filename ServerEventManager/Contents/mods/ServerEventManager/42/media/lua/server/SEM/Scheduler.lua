@@ -1,0 +1,309 @@
+-- Server Event Manager: fires schedule entries (config.schedules). Real-World windows run about once a minute from
+-- OnTickEvenPaused and on `hello`; game-time modes run from EveryTenMinutes on world hours. See docs/schedule-contract.md.
+if isClient() then return end
+require "SEM/Config"
+require "SEM/Schedule"
+require "SEM/WindowState"
+require "SEM/Conditions"
+require "SEM/Fmt"
+require "SEM/Store"
+require "SEM/Targets"
+require "SEM/Runner"
+
+local Store, Runner, S, WS, Fmt = SEM.Store, SEM.Runner, SEM.Schedule, SEM.WindowState, SEM.Fmt
+local Scheduler = {}
+SEM.Scheduler = Scheduler
+
+Scheduler.REAL_EVERY_MS = 60000
+Scheduler.HELLO_EVERY_MS = 20000
+
+-- Everything below that reads the outside world can be swapped by a test.
+
+-- server wall clock in Schedule's shape (dow 1 = Sunday); nil where Calendar is not exposed
+function Scheduler.clock()
+    if not (Calendar and Calendar.getInstance) then return nil end
+    local ok, c = pcall(function()
+        local cal = Calendar.getInstance()
+        return { year = cal:get(Calendar.YEAR), month = cal:get(Calendar.MONTH) + 1, day = cal:get(Calendar.DAY_OF_MONTH),
+            dow = cal:get(Calendar.DAY_OF_WEEK), hour = cal:get(Calendar.HOUR_OF_DAY), minute = cal:get(Calendar.MINUTE) }
+    end)
+    return ok and c or nil
+end
+
+-- World age in hours, shifted so that hours % 24 is the in-game hour of day: getWorldAgeHours counts from the world's
+-- creation (age 2 at 09:00 on a fresh test world), not from midnight.
+function Scheduler.worldHours()
+    local ok, h = pcall(function()
+        local gt = getGameTime()
+        local age = gt:getWorldAgeHours()
+        return age + (gt:getTimeOfDay() - age % 24) % 24
+    end)
+    return ok and h or nil
+end
+
+function Scheduler.nowMs() return Runner.clock() * 1000 end -- wall clock, so cooldowns survive a restart
+function Scheduler.throttleMs() return getTimestampMs() end
+function Scheduler.rng(n) return ZombRand(n) + 1 end -- 1..n, what Schedule and WindowState expect
+
+local lastReal, lastHello, lastPruneDay
+
+local function ready()
+    if not Store.config then Store.init() end
+    return Store.config and Store.world
+end
+
+-- entries in a stable order
+local function entries()
+    local ids, out = {}, {}
+    for id in pairs(Store.config.schedules) do ids[#ids + 1] = id end
+    table.sort(ids)
+    for _, id in ipairs(ids) do out[#out + 1] = Store.config.schedules[id] end
+    return out
+end
+
+local function isGame(entry) return entry.schedule.mode == "randomGame" or entry.schedule.mode == "scheduledGame" end
+
+local function stamp(now) return Fmt.DAYS[now.dow] .. string.format(" %02d:%02d", now.hour, now.minute) end
+local function gameStamp(h) return string.format("Day %d %02d:00", math.floor(h / 24) + 1, math.floor(h % 24)) end
+
+-- sets a display field; true when it changed
+local function put(entry, field, text)
+    if entry[field] == text then return false end
+    entry[field] = text
+    return true
+end
+
+-- the options this entry runs with: false = the event page's saved options, table = a preset's, nil + reason = cannot run
+local function resolveOptions(entry)
+    if entry.preset == "" then return false end
+    local p = Store.config.presets[entry.preset]
+    if not p then return nil, "preset '" .. entry.preset .. "' no longer exists" end
+    if p.eventId ~= entry.eventId then return nil, "preset '" .. entry.preset .. "' belongs to another event" end
+    return p.options
+end
+
+-- preset first, then the shared conditions (players, free event slot, cooldown since world.lastFired[id])
+function Scheduler.check(entry)
+    local o, why = resolveOptions(entry)
+    if o == nil then return false, why end
+    return SEM.Conditions.check(entry.conditions, {
+        onlinePlayers = #SEM.Targets.players(), activeRuns = Runner.liveCount(),
+        maxConcurrent = Store.config.limits.maxConcurrent, nowMs = Scheduler.nowMs(),
+        lastFiredMs = Store.world.lastFired[entry.id],
+    })
+end
+
+-- starts the entry now, no condition checks. Returns the run, or nil and why
+function Scheduler.fire(entry)
+    local o, why = resolveOptions(entry)
+    if o == nil then return nil, why end
+    local run, err = Runner.begin(entry.eventId, "schedule", o or nil, entry.name)
+    if not run then return nil, err end
+    Store.world.lastFired[entry.id] = Scheduler.nowMs()
+    return run
+end
+
+-- ---- display text ("next") ----
+
+local function realNext(entry, now)
+    local best
+    for _, w in ipairs(entry.schedule.windows) do
+        local n = S.nextOpen(w, now)
+        if n and (not best or n.inMinutes < best.inMinutes) then best = n end
+    end
+    if not best then return "None" end
+    if best.inMinutes <= 0 then return "OPEN NOW" end
+    return Fmt.DAYS[best.dow] .. " " .. Fmt.hhmm(best.startMin)
+end
+
+-- first slot after enabling
+local function rollFirst(entry, hours)
+    local sc = entry.schedule
+    if sc.mode == "scheduledGame" then return S.nextScheduledHour(hours, sc.everyDays, sc.atHour) end
+    return math.max(hours + sc.firstDelayDays * 24, S.nextGameHour(hours, sc.minDays, sc.maxDays, Scheduler.rng))
+end
+
+local function rollNext(entry, hours)
+    local sc = entry.schedule
+    if sc.mode == "scheduledGame" then return S.nextScheduledHour(hours, sc.everyDays, sc.atHour) end
+    return S.nextGameHour(hours, sc.minDays, sc.maxDays, Scheduler.rng)
+end
+
+-- recomputes entry.next (and rolls a first game slot if there is none); true when the text changed
+function Scheduler.refresh(entry, now)
+    local nextGame = Store.world.nextGameHour
+    local text = "Off"
+    if entry.enabled and entry.schedule.mode == "real" then
+        now = now or Scheduler.clock()
+        text = now and realNext(entry, now) or "Unknown"
+    elseif entry.enabled and isGame(entry) then
+        local h = Scheduler.worldHours()
+        if h and nextGame[entry.id] == nil then nextGame[entry.id] = rollFirst(entry, h) end
+        text = nextGame[entry.id] and gameStamp(nextGame[entry.id]) or "Pending"
+    end
+    if not (entry.enabled and isGame(entry)) then nextGame[entry.id] = nil end
+    return put(entry, "next", text)
+end
+
+local function pushSnapshot() Runner.toAdmins("snapshot", Store.snapshot()) end
+
+-- an edited entry starts over: new game slot, and its still-waiting windows are dropped quietly
+function Scheduler.touch(id)
+    if not ready() then return end
+    local entry = Store.config.schedules[id]
+    if not entry then return end
+    Store.world.nextGameHour[id] = nil
+    if not (entry.enabled and entry.schedule.mode == "real") then
+        local prefix = id .. ":"
+        for key, w in pairs(Store.world.windows) do
+            if key:sub(1, #prefix) == prefix and w.state == "waiting" then w.state = "skipped"; w.lastReason = "schedule off" end
+        end
+    end
+    Scheduler.refresh(entry)
+end
+
+-- ---- Real-World windows ----
+
+function Scheduler.realTick()
+    if not ready() then return end
+    local now = Scheduler.clock()
+    if not now then return end
+    local world, dirty = Store.world, false
+    for _, entry in ipairs(entries()) do
+        if entry.enabled and entry.schedule.mode == "real" then
+            local acts = WS.tick(world.windows, entry.id, { schedule = entry.schedule }, now,
+                function() return Scheduler.check(entry) end, Scheduler.rng)
+            for _, a in ipairs(acts) do
+                if a.type == "fire" then
+                    local run, why = Scheduler.fire(entry)
+                    if run then
+                        dirty = put(entry, "last", "fired " .. stamp(now)) or dirty
+                    else -- Runner.begin logged its own failure; the window is spent
+                        world.windows[a.key].state, world.windows[a.key].lastReason = "skipped", why
+                        dirty = put(entry, "last", "skipped " .. stamp(now)) or dirty
+                    end
+                else
+                    Runner.logSkip(entry.eventId, entry.name, a.reason)
+                    dirty = put(entry, "last", "skipped " .. stamp(now)) or dirty
+                end
+            end
+        end
+        dirty = Scheduler.refresh(entry, now) or dirty
+    end
+    local today = S.dayNumber(now.year, now.month, now.day)
+    if today ~= lastPruneDay then
+        lastPruneDay = today
+        WS.prune(world.windows, now)
+    end
+    if dirty then pushSnapshot() end
+end
+
+-- OnTickEvenPaused: about once a minute, paused or not
+function Scheduler.poll()
+    local ms = Scheduler.throttleMs()
+    if lastReal and ms - lastReal < Scheduler.REAL_EVERY_MS then return end
+    lastReal = ms
+    Scheduler.realTick()
+end
+
+-- any player can send hello, so it wakes the scheduler at most once per 20 seconds (D12: joining inside a window may fire it)
+function Scheduler.hello()
+    local ms = Scheduler.throttleMs()
+    if lastHello and ms - lastHello < Scheduler.HELLO_EVERY_MS then return end
+    lastHello = ms
+    Scheduler.realTick()
+end
+
+-- ---- Game time ----
+
+-- EveryTenMinutes. Game time does not advance while the server is down, so a slot is never "missed".
+function Scheduler.gameTick()
+    if not ready() then return end
+    local hours = Scheduler.worldHours()
+    if not hours then return end
+    local world, dirty = Store.world, false
+    for _, entry in ipairs(entries()) do
+        local sc = entry.schedule
+        if entry.enabled and isGame(entry) then
+            local nh = world.nextGameHour[entry.id]
+            if nh == nil then
+                world.nextGameHour[entry.id] = rollFirst(entry, hours)
+            elseif hours >= nh then
+                local quiet = sc.mode == "randomGame" and S.inQuietHours(math.floor(hours % 24), sc.quietStart, sc.quietEnd)
+                if not quiet then -- in quiet hours the slot waits for the end of them
+                    local label = gameStamp(hours)
+                    local ok, why = Scheduler.check(entry)
+                    if ok then
+                        local run = Scheduler.fire(entry) -- a refusal is already in the log, from Runner.begin
+                        dirty = put(entry, "last", (run and "fired " or "skipped ") .. label) or dirty
+                    else -- one failed condition skips this slot, logged once
+                        Runner.logSkip(entry.eventId, entry.name, why)
+                        dirty = put(entry, "last", "skipped " .. label) or dirty
+                    end
+                    world.nextGameHour[entry.id] = rollNext(entry, hours)
+                end
+            end
+        end
+        dirty = Scheduler.refresh(entry) or dirty
+    end
+    if dirty then pushSnapshot() end
+end
+
+-- runSchedule: now, ignoring timing, enabled and cooldown (Runner still enforces the event limit)
+function Scheduler.runNow(id)
+    if not ready() then return nil, "not ready" end
+    local entry = Store.config.schedules[id]
+    if not entry then return nil, "no such schedule" end
+    local run, why = Scheduler.fire(entry)
+    if not run then return nil, why end
+    local now = Scheduler.clock()
+    put(entry, "last", "fired " .. (now and stamp(now) or "now") .. " (manual)")
+    pushSnapshot()
+    return run
+end
+
+-- ---- Generate Random ----
+
+Scheduler.AUTO = "Auto: " -- generated entries are named this, so a new run can replace them
+
+-- Pure. A random Random Game Time schedule; rng(n) gives 1..n. Waits of 1 to 3 days at least, up to 4 days more, first run in 1 to 3 days
+function Scheduler.randomTiming(rng)
+    local lo = rng(3)
+    return { mode = "randomGame", minDays = lo, maxDays = lo + rng(4), firstDelayDays = rng(3), quietStart = 0, quietEnd = 0, everyDays = 7, atHour = 20, windows = {} }
+end
+
+-- Replaces every earlier generated entry with one Random Game Time entry per saved preset. Entries an admin made stay.
+-- Returns the count, or nil and why
+function Scheduler.generate()
+    if not ready() then return nil, "not ready" end
+    local names = {}
+    for n in pairs(Store.config.presets) do names[#names + 1] = n end
+    if #names == 0 then return nil, "Save a preset on an event page first" end
+    table.sort(names)
+    local prefix, old = Scheduler.AUTO, {}
+    for id, e in pairs(Store.config.schedules) do if e.name:sub(1, #prefix) == prefix then old[#old + 1] = id end end
+    for _, id in ipairs(old) do Store.deleteSchedule(id) end
+    local made = 0
+    for _, n in ipairs(names) do
+        if Store.scheduleCount() >= Store.MAX_SCHEDULES then break end
+        local ok, entry = Store.validateEntry({ name = (prefix .. n):sub(1, 40), eventId = Store.config.presets[n].eventId, preset = n, enabled = true,
+            schedule = Scheduler.randomTiming(Scheduler.rng), conditions = SEM.Conditions.defaults() })
+        if ok then
+            Scheduler.touch(Store.saveSchedule(nil, entry))
+            made = made + 1
+        end
+    end
+    return made
+end
+
+function Scheduler.init()
+    if not ready() then return end
+    lastReal, lastHello, lastPruneDay = nil, nil, nil
+    for _, entry in ipairs(entries()) do Scheduler.refresh(entry) end
+end
+
+SEM.Spawn.hook("OnServerStarted", Scheduler.init)
+SEM.Spawn.hook("OnTickEvenPaused", Scheduler.poll)
+SEM.Spawn.hook("EveryTenMinutes", Scheduler.gameTick)
+
+return Scheduler

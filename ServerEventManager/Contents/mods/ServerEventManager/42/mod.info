@@ -1,0 +1,7 @@
+name=Server Event Manager
+id=ServerEventManager
+author=JoshuaSHenderson
+modversion=0.1.0-beta
+versionMin=42.21.0
+loadModAfter=\ProjectALifeNPCs
+description=BETA, active work in progress: expect bugs. In-game admin console for manual and scheduled server events: airdrops, camps, hordes, wildfires, sieges, manhunts and more.

@@ -1,0 +1,15 @@
+*.bak
+__pycache__/
+*.log
+.testserver/
+.testserver.out
+.testclient*/
+.testclient*.out
+.testserver*/
+.testserver*.out
+.testself*
+*.out
+.testself*
+*.original.md
+PROJECT-PLAN.md
+docs/
