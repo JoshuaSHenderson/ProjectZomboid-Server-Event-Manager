@@ -12,4 +12,5 @@ __pycache__/
 .testself*
 *.original.md
 PROJECT-PLAN.md
-docs/
+docs/*
+!docs/screenshots/

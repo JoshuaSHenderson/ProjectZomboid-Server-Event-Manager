@@ -1,32 +1,38 @@
-"""Draws ServerEventManager/preview.png, the Workshop image. Needs Pillow. Run from repo root."""
+"""Draws ServerEventManager/preview.png, the Workshop image, in the console's own look. Needs Pillow. Run from repo root."""
 from PIL import Image, ImageDraw, ImageFont
 
-SIZE = 256
-EVENTS = ["Airdrop", "Hostile Camp", "Migrating Horde", "Wildfire", "Super Zombies", "Convoy Wreck"]
+SIZE, SCALE = 256, 4  # drawn large, then shrunk, for smooth text
+EVENTS = ["Airdrop", "Hostile Camp", "Migrating Horde", "Wildfire", "Super Zombies", "Convoy Wreck", "Under Siege", "Stranger Calls For Help", "Hunted"]
+LINE, GREEN, HOT, RUST = (92, 92, 92), (115, 209, 77), (255, 255, 255), (96, 52, 24)
 
 
 def font(px):
     try:
-        return ImageFont.truetype("arialbd.ttf", px)
+        return ImageFont.truetype("arialbd.ttf", px * SCALE)
     except OSError:
         return ImageFont.load_default()
 
 
-img = Image.new("RGB", (SIZE, SIZE), (12, 12, 12))
+def box(x1, y1, x2, y2):
+    return (x1 * SCALE, y1 * SCALE, x2 * SCALE, y2 * SCALE)
+
+
+img = Image.new("RGB", (SIZE * SCALE, SIZE * SCALE), (14, 14, 12))
 d = ImageDraw.Draw(img)
-d.rectangle((6, 6, SIZE - 7, SIZE - 7), outline=(102, 102, 102))
-d.rectangle((7, 7, SIZE - 8, 58), fill=(30, 30, 30))
-d.line((7, 58, SIZE - 8, 58), fill=(102, 102, 102))
-d.text((SIZE / 2, 22), "Server Event", font=font(19), fill=(255, 255, 255), anchor="mm")
-d.text((SIZE / 2, 43), "Manager", font=font(19), fill=(255, 255, 255), anchor="mm")
-y = 70
+d.rectangle(box(4, 4, SIZE - 5, 42), fill=(30, 29, 26))
+d.rectangle(box(4, 4, SIZE - 5, SIZE - 5), outline=LINE, width=SCALE)
+d.line(box(4, 42, SIZE - 5, 42), fill=LINE, width=SCALE)
+d.text((13 * SCALE, 23 * SCALE), "Server Event Manager", font=font(15), fill=HOT, anchor="lm")
+d.rectangle(box(SIZE - 52, 14, SIZE - 13, 32), outline=(235, 60, 40), width=SCALE)
+d.text(((SIZE - 32.5) * SCALE, 23 * SCALE), "BETA", font=font(11), fill=(235, 60, 40), anchor="mm")
+
+ROW, y = 22, 48
 for i, name in enumerate(EVENTS):
-    if i == 0:
-        d.rectangle((8, y - 3, SIZE - 9, y + 23), fill=(90, 50, 25))
-    d.text((18, y + 10), name, font=font(13), fill=(255, 255, 255), anchor="lm")
-    on = i < 2
-    colour = (115, 209, 77) if on else (178, 178, 178)
-    d.rectangle((SIZE - 56, y + 1, SIZE - 18, y + 19), outline=colour)
-    d.text((SIZE - 37, y + 10), "ON" if on else "OFF", font=font(10), fill=colour, anchor="mm")
-    y += 29
-img.resize((512, 512), Image.LANCZOS).save("ServerEventManager/preview.png")
+    live = name == "Hunted"
+    if live:
+        d.rectangle(box(5, y, SIZE - 6, y + ROW - 2), fill=RUST)
+    d.text((13 * SCALE, (y + 10) * SCALE), name, font=font(12), fill=HOT, anchor="lm")
+    d.rectangle(box(SIZE - 46, y + 2, SIZE - 13, y + 18), outline=GREEN, width=SCALE)
+    d.text(((SIZE - 29.5) * SCALE, (y + 10) * SCALE), "ON", font=font(10), fill=GREEN, anchor="mm")
+    y += ROW
+img.resize((SIZE, SIZE), Image.LANCZOS).save("ServerEventManager/preview.png")

@@ -8,6 +8,12 @@ wrecks, sieges, manhunts and rescue calls. Players get on-screen alerts, a sound
 > **Beta, under active development. Expect bugs.** If you hit one, please
 > [open an issue](https://github.com/JoshuaSHenderson/ProjectZomboid-Server-Event-Manager/issues) with what you did and your `console.txt`.
 
+## Screenshots
+
+![Event options: every setting has a hover blurb](docs/screenshots/event-options.png)
+
+![Scheduler: random entries generated from presets](docs/screenshots/scheduler.png)
+
 ## Status
 
 Beta. Unit specs and a self-test inside real Project Zomboid Lua pass, and the console and most events have been played on a test
