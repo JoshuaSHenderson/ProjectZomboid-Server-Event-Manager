@@ -62,6 +62,7 @@ end
 local function sendIds() SEM.Runner.toAll("superState", Super.marks()) end
 
 local function place(run, o)
+    Spawn.clearSite(run, o)
     local sq = Spawn.findSquare(run.x, run.y, 15, o)
     if not sq then return SEM.Runner.fail(run, "no valid ground near the target") end
     run.x, run.y, run.z = sq:getX(), sq:getY(), 0

@@ -9,7 +9,7 @@ local T, F = SEM.Theme, SEM.Fmt
 local Feed = {}
 SEM.Feed = Feed
 
-local LINE = 16
+local LINE = 16 -- line step; grows with the font (set at the top of each draw)
 
 local function titles()
     local t = {}
@@ -45,6 +45,7 @@ local function empty(v, str)
 end
 
 local function drawActive(v)
+    LINE = math.max(16, T.fh() + 2)
     local c, snap, ids = T.c, SEM.Net.snapshot or {}, titles()
     local w = v:getWidth() - 20
     local y = 4
@@ -73,6 +74,15 @@ local function drawActive(v)
             y = y + 6
         end
     end
+    for _, e in ipairs(snap.queue or {}) do -- waiting for a free slot (D41)
+        if type(e) == "table" then
+            local cw = T.tw("Cancel") + 12
+            T.text(v, T.fit(F.entryText({ eventId = e.eventId, title = e.title, state = "pending" }, ids), w - cw - 8), 6, y, c.dim)
+            T.pill(v, w - cw + 12, y - 2, "Cancel", c.red)
+            table.insert(v.hits, { x = w - cw + 12, y = y - 2, w = cw, h = LINE + 2, id = e.id })
+            y = y + LINE + 8
+        end
+    end
     if y == 4 then return empty(v, "No active events") end
     if y ~= v.lastH then v.lastH = y; v:setScrollHeight(y + 8) end
 end
@@ -86,6 +96,7 @@ local function put(v, str, col, w, y)
 end
 
 local function drawLogs(v)
+    LINE = math.max(16, T.fh() + 2)
     local c, snap, ids = T.c, SEM.Net.snapshot or {}, titles()
     local w = v:getWidth() - 20
     local y = 4

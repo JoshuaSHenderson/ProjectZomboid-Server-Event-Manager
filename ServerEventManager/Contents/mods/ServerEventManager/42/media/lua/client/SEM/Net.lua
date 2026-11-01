@@ -70,8 +70,20 @@ function on.error(args)
     console("onError", args.command, errs, args.ack)
 end
 
+local function cfgWin(fn, ...)
+    local C = SEM.ConfigPage
+    if C and C[fn] then
+        local ok, err = pcall(C[fn], ...)
+        if not ok then print("[SEM] config page " .. fn .. ": " .. tostring(err)) end
+    end
+end
+
+function on.configExport(args) cfgWin("onExport", type(args) == "table" and args.text or nil) end
+function on.configError(args) cfgWin("onError", type(args) == "table" and args.text or nil) end
+
 function on.notice(args)
     args = type(args) == "table" and args or {}
+    if args.text == "Config imported" then cfgWin("onImported") end
     Net.line(args.text or "notice", args.bad)
 end
 

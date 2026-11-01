@@ -64,7 +64,7 @@ local function run()
     for k, v in pairs(ev.options) do o[k] = v end
     o.leadMinutes, o.soundOn, o.markerExact, o.title, o.locationMode = 1, false, true, "Test Drop", "nearRandomPlayer"
     o.crateCount, o.guardType, o.guardCount = 2, "zombies", 8
-    o.lootPack = "High"
+    o.lootPack = { "High" }
     sent = {}
     S(SEM.Config.MODULE, "saveEvent", player, { id = "airdrop", options = o })
     check("save no error", find("error"), nil)
@@ -73,7 +73,7 @@ local function run()
     check("lead stored", ev.options.leadMinutes, 1)
     check("sound stored", ev.options.soundOn, false)
     check("exact stored", ev.options.markerExact, true)
-    check("loot stored", ev.options.lootPack, "High")
+    check("loot stored", ev.options.lootPack[1], "High")
 
     -- preset
     sent = {}
@@ -346,7 +346,7 @@ local function run()
     end
     -- 1 and 3: option bounds
     local lo = copyOpts("airdrop")
-    lo.lootPack = { "not text" }
+    lo.lootPack = { 5 }
     sent = {}
     S(MOD, "saveEvent", player, { id = "airdrop", options = lo })
     check("bad loot pack rejected", find("error") and find("error").errors["options.lootPack"] ~= nil, true)
@@ -370,24 +370,18 @@ local function run()
     S(MOD, "saveEvent", player, { id = "airdrop", options = keep, reqId = {} })
     check("bad reqId refused", find("error") and find("error").errors.reqId ~= nil, true)
 
-    -- 14: Force with Override limits
+    -- 14: a forced run starts whatever the limit and is not counted (D41)
     Store.config.limits.maxConcurrent = 1
-    local f1 = R.begin("airdrop", "force")
+    local f1 = R.begin("airdrop", "schedule")
     check("first run", f1 ~= nil, true)
     sent = {}
     S(MOD, "forceEvent", player, { id = "airdrop" })
-    check("refused at the limit", find("notice") and find("notice").bad, true)
-    sent = {}
-    S(MOD, "forceEvent", player, { id = "airdrop", override = true })
-    check("override starts it", find("notice"), nil)
-    check("two live", R.liveCount(), 2)
-    sent = {}
-    S(MOD, "forceEvent", player, { id = "airdrop", override = "x" })
-    check("override must be boolean", find("error") and find("error").errors.override ~= nil, true)
+    check("force starts at the limit", find("notice"), nil)
+    check("one counted", R.liveCount(), 1)
     reset()
     Store.config.limits.maxConcurrent = keepLimit
 
-    -- 11: no flyover without lead time; the landing alert ends it
+    -- 11: no alert carries a flyover; it is sent when the crates are placed
     local fo = Store.config.events.airdrop.options
     local keepLead, keepSound, keepFly, keepDur = fo.leadMinutes, fo.soundOn, fo.flyoverSound, fo.durationMinutes
     fo.soundOn, fo.flyoverSound, fo.leadMinutes = true, true, 0
@@ -398,7 +392,7 @@ local function run()
     fo.leadMinutes = 1
     sent = {}
     local a1 = R.begin("airdrop", "force")
-    check("lead 1: flyover", find("alert") and find("alert").flyover, true)
+    check("lead 1: no flyover in the warning", find("alert") and find("alert").flyover == true, false)
     sent = {}
     now = now + 61
     R.pollNow()
@@ -631,7 +625,7 @@ local function run()
     -- all three events: force, status, cancel, with each option type the form offers
     local cases = {
         { "camp", { lootCrate = true, groupSize = 3, npcTier = "random", fallbackCount = 4 } },
-        { "convoy", { vehiclePack = "NoSuchPack", vehicleCount = 2, guardType = "random" } },
+        { "convoy", { vehiclePack = { "NoSuchPack" }, vehicleCount = 2, guardType = "random" } },
         { "super", { count = 3, speed = "random", boss = true, outfit = "" } },
     }
     for _, c in ipairs(cases) do
@@ -682,7 +676,7 @@ local function run()
     SEM.Events.wildfire.guardAll()
     check("snapshot has loot packs", Store.snapshot().config.lootPacks[1].name, "Low")
     local gen = Store.config.presets
-    SEM.Scheduler.generate()
+    SEM.Scheduler.generate(1)
     Store.config.presets = gen
     if ProjectALife and ProjectALife.DebugService then
         local K, Reg = ProjectALife.Knowledge, ProjectALife.ActorRegistry

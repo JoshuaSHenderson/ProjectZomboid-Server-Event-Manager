@@ -1,0 +1,12 @@
+module Base
+{
+    sound SEM_RadioChatter
+    {
+        category = UI,
+        master = Ambient,
+        clip
+        {
+            file = media/sound/SEM_RadioChatter.ogg,
+        }
+    }
+}

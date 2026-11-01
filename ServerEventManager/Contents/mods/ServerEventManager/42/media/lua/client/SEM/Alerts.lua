@@ -9,10 +9,10 @@ local Alerts = {}
 SEM.Alerts = Alerts
 Alerts.flyovers = {}
 
-local PING = "UIActivateTab"
+local PING = "SEM_RadioChatter" -- scripts/ServerEventManager/sounds_sem.txt
 local SHOW_MS, FADE_MS, SOUND = 9000, 1500, "Helicopter" -- sound id exists in scripts/generated/sounds/sounds_meta.txt
 
-local FLY_MAX_MS = 5 * 60 * 1000
+local waiting, lastStart = {}, 0 -- D41: banners wait their turn, one at a time, ALERT_GAP real seconds apart
 
 local Banner =ISPanel:derive("SEMBanner")
 
@@ -71,11 +71,7 @@ function Alerts.hasRadio(player)
     return ok and yes
 end
 
-function Alerts.show(args)
-    -- any later alert for this id that is not itself a flyover (the start alert) ends the helicopter
-    if args.id ~= nil then Alerts.stopFlyover(args.id) end
-    if args.radio and not Alerts.hasRadio(getPlayer()) then return end
-    if Alerts.current then Alerts.current:removeFromUIManager() end
+local function display(args)
     local w = math.min(640, getCore():getScreenWidth() - 40)
     local lines = wrap(args.message or "", w - 28)
     local h = 20 + T.fh(T.font.big) + #lines * T.fh(T.font.med)
@@ -89,11 +85,20 @@ function Alerts.show(args)
     Alerts.current = b
     b.runId = args.id
     if args.sound then getSoundManager():playUISound(PING) end
+end
+
+-- #26: the helicopter plays once the crates are down, straight away (not behind the banner queue), and the tick below stops it
+function Alerts.flyover(args)
     local p = getPlayer()
-    if args.id ~= nil and args.flyover and p then
-        -- keep the emitter that played it; stopping later must not depend on getPlayer() still being the same
-        Alerts.flyovers[args.id] = { snd = p:playSoundLocal(SOUND), em = p:getEmitter(), born = getTimestampMs() }
-    end
+    if args.id == nil or not p then return end
+    if args.radio and not Alerts.hasRadio(p) then return end
+    -- keep the emitter that played it; stopping later must not depend on getPlayer() still being the same
+    Alerts.flyovers[args.id] = { snd = p:playSoundLocal(SOUND), em = p:getEmitter(), born = getTimestampMs() }
+end
+
+function Alerts.show(args)
+    if args.radio and not Alerts.hasRadio(getPlayer()) then return end
+    waiting[#waiting + 1] = args
 end
 
 -- stops the helicopter for a run id; harmless when it is already stopped or the sound ended by itself
@@ -103,8 +108,11 @@ function Alerts.stopFlyover(id)
     if f and f.snd and f.em then pcall(function() f.em:stopSound(f.snd) end) end
 end
 
--- a cancelled or failed run takes its banner and helicopter with it
+-- a cancelled or failed run takes its banner (shown or waiting) and helicopter with it
 function Alerts.cancel(id)
+    for i = #waiting, 1, -1 do
+        if waiting[i].id == id then table.remove(waiting, i) end
+    end
     local c = Alerts.current
     if c and c.runId == id then
         c:removeFromUIManager()
@@ -113,23 +121,29 @@ function Alerts.cancel(id)
     Alerts.stopFlyover(id)
 end
 
--- D27: the helicopter never plays longer than FLY_MAX_MS; checked once a second
+-- the helicopter never plays longer than FLYOVER_SECONDS; checked once a second
 local lastCheck = 0
 Events.OnTick.Add(function()
     local t = getTimestampMs()
+    if waiting[1] and not Alerts.current and (t - lastStart >= SEM.Config.ALERT_GAP * 1000 or t < lastStart) then
+        lastStart = t
+        local ok, err = pcall(display, table.remove(waiting, 1))
+        if not ok then print("[SEM] alert: " .. tostring(err)) end
+    end
     if t - lastCheck < 1000 then return end
     lastCheck = t
     local old = {}
     for id, f in pairs(Alerts.flyovers) do
-        if t - f.born >= FLY_MAX_MS then old[#old + 1] = id end
+        if t - f.born >= SEM.Config.FLYOVER_SECONDS * 1000 then old[#old + 1] = id end
     end
     for _, id in ipairs(old) do Alerts.stopFlyover(id) end
 end)
 
 Events.OnServerCommand.Add(function(module, command, args)
     if module ~= SEM.Config.MODULE or type(args) ~= "table" then return end
-    if command ~= "alert" and command ~= "alertCancel" then return end
-    local ok, err = pcall(command == "alert" and Alerts.show or Alerts.cancel, command == "alert" and args or args.id)
+    local fn = command == "alert" and Alerts.show or command == "flyover" and Alerts.flyover or command == "alertCancel" and Alerts.cancel
+    if not fn then return end
+    local ok, err = pcall(fn, command == "alertCancel" and args.id or args)
     if not ok then print("[SEM] alert: " .. tostring(err)) end
 end)
 

@@ -13,6 +13,7 @@ SEM.Markers = Markers
 
 local MIN_PX, POLL_MS = 12, 2000 -- on-screen pixels, exact markers only; how often the minimap is checked
 local list = {} -- id -> { x, y, radius, exact, radio, title, event, text, on = { surface -> { handle, api } } }
+local dots = {} -- id -> { x, y, dot = true, on }: admins only, the true site as a small grey dot; no hover box
 local lastPoll = 0
 
 local function erase(m)
@@ -20,7 +21,10 @@ local function erase(m)
     m.on = {}
 end
 
-local function shown(m) return not m.radio or SEM.Alerts.hasRadio(getPlayer()) end
+local function shown(m)
+    if m.dot then return SEM.isAdmin(getPlayer()) end -- cosmetic: the server only sends dots to admins
+    return not m.radio or SEM.Alerts.hasRadio(getPlayer())
+end
 
 local function draw(m, surface, api)
     local old = m.on[surface]
@@ -29,9 +33,12 @@ local function draw(m, surface, api)
     if not shown(m) then return end -- checked each time a map opens
     local r, g, b, a = 1.0, 0.55, 0.1, 0.55
     if m.exact then r, g, b, a = 1.0, 0.15, 0.1, 0.9 end
-    local handle = api:addGridSquareMarker(m.x, m.y, m.radius, r, g, b, a)
+    if m.dot then r, g, b, a = 0.6, 0.6, 0.6, 1 end
+    local handle = api:addGridSquareMarker(m.x, m.y, m.dot and 1 or m.radius, r, g, b, a)
     m.on[surface] = { handle = handle, api = api }
-    if m.exact then -- both exist on WorldMapGridSquareMarkerV1; keeps a 5 tile marker visible when zoomed out
+    if m.dot then
+        pcall(function() handle:setMinScreenRadius(4) end)
+    elseif m.exact then -- both exist on WorldMapGridSquareMarkerV1; keeps a 5 tile marker visible when zoomed out
         pcall(function() handle:setMinScreenRadius(MIN_PX) end)
         pcall(function() handle:setBlink(true) end)
     end
@@ -53,12 +60,14 @@ end
 -- redraws every marker on the open world map and the minimap; safe to call when neither exists
 function Markers.redraw()
     local world, mini = worldApi(), miniMap()
-    for _, m in pairs(list) do
-        local ok, err = pcall(function()
-            if world then draw(m, "world", world) end
-            if mini then draw(m, "mini", mini.mapAPI:getMarkersAPI()) end
-        end)
-        if not ok then print("[SEM] marker: " .. tostring(err)) end
+    for _, set in ipairs({ list, dots }) do
+        for _, m in pairs(set) do
+            local ok, err = pcall(function()
+                if world then draw(m, "world", world) end
+                if mini then draw(m, "mini", mini.mapAPI:getMarkersAPI()) end
+            end)
+            if not ok then print("[SEM] marker: " .. tostring(err)) end
+        end
     end
 end
 
@@ -119,10 +128,12 @@ Events.OnTick.Add(function()
     local mini = miniMap()
     if not mini then return end
     local api = mini.mapAPI:getMarkersAPI()
-    for _, m in pairs(list) do
-        if not m.on.mini then
-            local ok, err = pcall(draw, m, "mini", api)
-            if not ok then print("[SEM] minimap marker: " .. tostring(err)) end
+    for _, set in ipairs({ list, dots }) do
+        for _, m in pairs(set) do
+            if not m.on.mini then
+                local ok, err = pcall(draw, m, "mini", api)
+                if not ok then print("[SEM] minimap marker: " .. tostring(err)) end
+            end
         end
     end
 end)
@@ -144,6 +155,27 @@ function on.markerRemove(a)
     local m = list[a.id]
     if m then erase(m) end
     list[a.id] = nil
+    if dots[a.id] then erase(dots[a.id]) end
+    dots[a.id] = nil
+end
+
+local function addDot(a)
+    if type(a.id) ~= "number" or type(a.x) ~= "number" or type(a.y) ~= "number" then return end
+    if dots[a.id] then erase(dots[a.id]) end
+    dots[a.id] = { x = a.x, y = a.y, dot = true, on = {} }
+end
+
+function on.markerExact(a)
+    addDot(a)
+    Markers.redraw()
+end
+
+-- full replacement, admins only, sent in answer to hello; an empty list arrives as nil
+function on.markerExactState(a)
+    for _, m in pairs(dots) do erase(m) end
+    dots = {}
+    for _, d in ipairs(a.dots or {}) do addDot(d) end
+    Markers.redraw()
 end
 
 -- full replacement, sent in answer to hello; an empty list arrives as nil

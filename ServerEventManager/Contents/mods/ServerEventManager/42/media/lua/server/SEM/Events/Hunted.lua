@@ -51,8 +51,10 @@ function Hunted.start(run)
         p = online(o.huntedPlayer)
         if not p then return SEM.Runner.fail(run, "chosen player is not online") end
     else
-        local list = SEM.Targets.players()
-        if #list == 0 then return SEM.Runner.fail(run, "no players online") end
+        local list = SEM.Targets.eligible(o)
+        if #list == 0 then
+            return SEM.Runner.fail(run, #SEM.Targets.players() == 0 and "no players online" or "no player is at least " .. o.minAgeDays .. " days old")
+        end
         p = list[ZombRand(#list) + 1]
     end
     d.target, d.hours = p:getUsername(), p:getHoursSurvived()

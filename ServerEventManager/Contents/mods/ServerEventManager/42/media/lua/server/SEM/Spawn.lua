@@ -49,6 +49,52 @@ end
 
 Spawn.suits = suits
 
+-- fraction of loaded z 0 squares with a tree, sampled every 2nd square within 6 tiles; nil when under half the samples are
+-- loaded (a dedicated server has no forest zones and cannot classify unloaded squares, so this reads real squares)
+function Spawn.treeCover(x, y)
+    local cell, loaded, trees, total = getCell(), 0, 0, 0
+    for dx = -6, 6, 2 do
+        for dy = -6, 6, 2 do
+            total = total + 1
+            local sq = cell:getGridSquare(x + dx, y + dy, 0)
+            if sq then
+                loaded = loaded + 1
+                local ok, tree = pcall(function() return sq:HasTree() end)
+                if ok and tree then trees = trees + 1 end
+            end
+        end
+    end
+    if loaded * 2 < total then return nil end
+    return trees / loaded
+end
+
+local FOREST_COVER = 0.12 -- tuning knob: tree fraction at or under which ground counts as clear for Avoid Forest
+local CLEAR_MODES = { town = true, countryside = true, nearRandomPlayer = true, nearChosenPlayer = true }
+
+-- Avoid Forest on real squares, once, when the site is loaded. Moves run.x,y (and the marker) to the nearest clear ring
+-- point; warns and stays when none within 60 tiles. At most 6 rings * 12 points * 49 samples lookups.
+function Spawn.clearSite(run, o)
+    if not (o.avoidForest == true and CLEAR_MODES[o.locationMode]) or run.data.cleared then return end
+    local here = Spawn.treeCover(run.x, run.y)
+    if not here then return end
+    run.data.cleared = true
+    if here <= FOREST_COVER then return end
+    for ring = 10, 60, 10 do
+        local bx, by, best = nil, nil, FOREST_COVER + 1
+        for i = 0, 11 do
+            local a = i * math.pi / 6
+            local x, y = math.floor(run.x + math.cos(a) * ring + 0.5), math.floor(run.y + math.sin(a) * ring + 0.5)
+            local c = Spawn.treeCover(x, y)
+            if c and c <= FOREST_COVER and c < best then bx, by, best = x, y, c end
+        end
+        if bx then
+            run.x, run.y = bx, by
+            return SEM.Runner.crateLanded(run, bx, by)
+        end
+    end
+    SEM.Runner.warn(run, "no clear ground found near the site, placing in the trees")
+end
+
 -- nearest loaded square to (x,y) on z 0 that suits a crate; o = event options for the zone check,
 -- used = optional set of "x,y" keys to skip
 function Spawn.findSquare(x, y, radius, o, used)
@@ -87,19 +133,24 @@ function Spawn.findCrate(square, runId)
     end
 end
 
--- Pure. The rows of a pack from packs { name, items, picks, tier }. "random" takes any pack with items, "random:high" any of that tier.
--- picks > 0 draws that many rows at random, each certain to be added. rand(n) gives 0..n-1. nil when no such pack exists.
-function Spawn.packRows(name, packs, rand)
-    local pack
-    local tier = tostring(name):match("^random:(%a+)$")
-    if name == "random" or tier then
-        local full = {}
-        for _, p in ipairs(packs) do
-            if #p.items > 0 and (not tier or p.tier == tier) then full[#full + 1] = p end
+-- Pure. The rows of one pack from packs { name, items, picks, tier }: names is a list, one entry is picked at random. "random" takes
+-- any pack with items, "random:high" any of that tier. picks > 0 draws that many rows at random, each certain to be added.
+-- rand(n) gives 0..n-1. nil when the list is empty or the entry resolves to no pack.
+function Spawn.packRows(names, packs, rand)
+    local left, pack = {}, nil
+    for i, n in ipairs(names) do left[i] = n end
+    while not pack and #left > 0 do -- a listed pack that was deleted since gives way to the others
+        local name = table.remove(left, rand(#left) + 1)
+        local tier = tostring(name):match("^random:(%a+)$")
+        if name == "random" or tier then
+            local full = {}
+            for _, p in ipairs(packs) do
+                if #p.items > 0 and (not tier or p.tier == tier) then full[#full + 1] = p end
+            end
+            pack = full[1] and full[rand(#full) + 1]
+        else
+            for _, p in ipairs(packs) do if p.name == name then pack = p end end
         end
-        pack = full[1] and full[rand(#full) + 1]
-    else
-        for _, p in ipairs(packs) do if p.name == name then pack = p end end
     end
     if not pack then return nil end
     if pack.picks == 0 then return pack.items end
@@ -156,7 +207,7 @@ function Spawn.placeCrates(run, o, count, smoke)
         if smoke then pcall(function() IsoFireManager.StartSmoke(getCell(), sq, true, 100, 500) end) end
     end
     if #sites < count then SEM.Runner.warn(run, "only " .. #sites .. " of " .. count .. " crates fit") end
-    if gone then SEM.Runner.warn(run, "loot pack " .. tostring(o.lootPack) .. " not found, using the built-in list") end
+    if gone then SEM.Runner.warn(run, "loot pack " .. table.concat(o.lootPack, ", ") .. " not found, using the built-in list") end
     local names = {}
     for item in pairs(unknown) do names[#names + 1] = item end
     if #names > 0 then table.sort(names); SEM.Runner.warn(run, "unknown loot items skipped: " .. table.concat(names, ", ")) end
@@ -448,15 +499,21 @@ Spawn.nearestPlayer = nearestPlayer
 -- shared out over all, one site after another so a shortfall at one is made up at the next). Zombies spawn across ticks, so
 -- the result comes through done(guards, noun, sprinters): the guard count, a noun for the status line ("Level 2 NPC" or
 -- "zombie") and the sprinter count. done is called at once when there is nothing to wait for.
--- NPC guards fall back to zombies, npcCount * 2 of them, with a warning saying why.
-function Spawn.siteGuards(run, o, sites, done)
+-- NPC guards fall back to zombies, npcCount * 2 of them, with a warning saying why. NPC guards are saved in run.data like a
+-- camp's group (Camp's hook claims them, which gives them their icons). refs, when given, collects the zombies as Spawn.guards does.
+function Spawn.siteGuards(run, o, sites, done, refs)
     if o.guardType == "none" or #sites == 0 then return done(0, "", 0) end
     local want = o.guardCount
     if o.guardType == "npc" then
         local sq = sites[1]
         local made, why = SEM.Compat_ALife.spawnGuards(nearestPlayer(sq:getX(), sq:getY()), sq:getX(), sq:getY(), sq:getZ(),
             o.npcCount, o.npcTier, o.guardLeash, o.guardLeash)
-        if made > 0 then return done(made, "Level " .. tostring(o.npcTier):sub(5) .. " NPC", 0) end
+        if made > 0 then
+            run.data.want, run.data.uids, run.data.dead = made, {}, {}
+            run.data.claimX, run.data.claimY, run.data.claimUntil = sq:getX(), sq:getY(), SEM.Runner.clock() + C.CAMP_CLAIM
+            SEM.Events.camp.hookALife() -- at call time: Camp requires Spawn
+            return done(made, "Level " .. tostring(o.npcTier):sub(5) .. " NPC", 0)
+        end
         SEM.Runner.warn(run, "NPC guards failed (" .. tostring(why) .. "), using zombies")
         want = o.npcCount * 2
     end
@@ -464,7 +521,7 @@ function Spawn.siteGuards(run, o, sites, done)
     local pct = o.guardType == "zombies" and o.guardSprinterPct or 0
     local function site(i)
         if i > #sites then return done(guards, "zombie", sprinters) end
-        Spawn.guards(run, sites[i], math.ceil(left / (#sites - i + 1)), o.guardRadius, pct, nil, nil, function(made, sp)
+        Spawn.guards(run, sites[i], math.ceil(left / (#sites - i + 1)), o.guardRadius, pct, nil, refs, function(made, sp)
             left, guards, sprinters = left - made, guards + made, sprinters + sp
             site(i + 1)
         end)

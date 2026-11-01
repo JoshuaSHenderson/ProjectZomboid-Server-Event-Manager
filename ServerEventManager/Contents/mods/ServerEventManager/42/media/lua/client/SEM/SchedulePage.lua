@@ -1,6 +1,7 @@
 -- Server Event Manager: Scheduler page (D34). Table of schedule entries, plus the edit view for one entry.
 -- c is the console. The edit draft lives in c.drafts.scheduler, its base in c.base.scheduler.
 if isServer() then return end
+require "ISUI/ISTextBox"
 require "SEM/Theme"
 require "SEM/Net"
 require "SEM/Fmt"
@@ -13,18 +14,15 @@ local T, F, Net, SU = SEM.Theme, SEM.Fmt, SEM.Net, SEM.ScheduleUI
 local P = {}
 SEM.SchedulePage = P
 
-local RH, ARM_MS, MAX_SCHEDULES = 24, 5000, 50
-local CX = 190
+local RH, MAX_SCHEDULES = 24, 50
 local HELP = {
     name = "Shown in the table and in Logs. 1 to 40 characters, different from every other entry.",
     eventId = "The event this entry runs when its time comes.",
-    preset = "Options to run with. 'Use event's saved settings' runs whatever the event page has saved. If a named preset is deleted later, the entry skips and Logs says why.",
+    preset = "Options to run with. Default runs the event's own settings from its page. If a named preset is deleted later, the entry skips and Logs says why.",
 }
-local GEN_HELP = "Makes one Random Game Time entry for every saved preset, with random waits, armed and ready. They are named Auto, and generating again replaces only those. Entries you made stay. Press twice to confirm."
+local GEN_HELP = "Adds the number of Random Game Time entries you choose, 1 to 50, using your saved presets in turn, with random waits, armed and ready. They are named Auto. It only adds: no entry is changed or deleted. It stops at 50 entries in all."
 local ON_HELP = "Tick to arm this entry so it fires on its schedule. Clear it to pause the entry without deleting it."
-local USE_SAVED = "Use event's saved settings"
-
-local function now() return getTimestampMs() end
+local USE_SAVED = "Default"
 
 local function setOn(b, on)
     b:setEnable(on and true or false)
@@ -102,7 +100,7 @@ function P.open(c, s)
     local d = s and P.draftOf(s) or newDraft()
     c.edit = { id = s and s.id or nil }
     c.drafts.scheduler, c.base.scheduler = d, F.copy(d)
-    c.serverErrs, c.sArm = {}, nil
+    c.serverErrs = {}
     c.rebuildNext = true
 end
 
@@ -125,19 +123,20 @@ end
 
 -- the edit view
 function P.edit(c, f, d, y)
+    local step = math.max(30, T.bh() + 8) -- row step grows with the font
+    f:measure({ "Name", "Event", "Preset" }, SU.labels())
+    local CX = f.cx
     table.insert(f.heads, { c.edit.id and "Edit schedule" or "New schedule", y })
-    y = y + 24
-    f:help(HELP.name, CX - 22, y)
-    f:label("Name", y, "name", CX + 198, y)
-    f:entry("name", CX, y, 190, d.name, function(t) d.name = t; f.onChange(false) end)
-    y = y + 30
+    y = y + math.max(24, T.fh() + 8)
+    f:label("Name", y, "name", CX + f:cw(190) + 8, y, HELP.name)
+    f:tip(f:entry("name", CX, y, f:cw(190), d.name, function(t) d.name = t; f.onChange(false) end), HELP.name)
+    y = y + step
 
     local ids, titles = {}, {}
     for i, def in ipairs(SEM.EventDefs) do ids[i], titles[i] = def.id, def.title end
-    f:help(HELP.eventId, CX - 22, y)
-    f:label("Event", y, "eventId", CX + 178, y)
-    f:combo("eventId", CX, y, 170, ids, d.eventId, function(v) d.eventId = v; d.preset = ""; f.onChange(true) end, titles)
-    y = y + 30
+    f:label("Event", y, "eventId", CX + f:cw(170) + 8, y, HELP.eventId)
+    f:tip(f:combo("eventId", CX, y, f:cw(170), ids, d.eventId, function(v) d.eventId = v; d.preset = ""; f.onChange(true) end, titles), HELP.eventId)
+    y = y + step
 
     local pv, pl = { "" }, { USE_SAVED }
     local found = d.preset == ""
@@ -146,41 +145,72 @@ function P.edit(c, f, d, y)
         if n == d.preset then found = true end
     end
     if not found then pv[#pv + 1], pl[#pl + 1] = d.preset, d.preset .. " (missing)" end
-    f:help(HELP.preset, CX - 22, y)
-    f:label("Preset", y, "preset", CX + 268, y)
-    f:combo("preset", CX, y, 260, pv, d.preset, function(v) d.preset = v; f.onChange(false) end, pl)
-    y = y + 36
+    f:label("Preset", y, "preset", CX + f:cw(260) + 8, y, HELP.preset)
+    f:tip(f:combo("preset", CX, y, f:cw(260), pv, d.preset, function(v) d.preset = v; f.onChange(false) end, pl), HELP.preset)
+    y = y + step + 6
 
     return SU.build(f, d.schedule, d.conditions, y, function() return Net.clock() end, true)
 end
 
--- two-step button: first press arms it for ARM_MS, second sends cmd for the selected row
-local function press(c, kind, cmd)
-    local id = c.schedSel
-    if not id then return end
-    c.serverErrs = {}
-    local a = c.sArm
-    if a and a.kind == kind and a.id == id and now() < a.till then
-        c.sArm = nil
-        Net.send(cmd, { id = id })
-    else
-        c.sArm = { kind = kind, id = id, till = now() + ARM_MS }
-    end
-    c:applyErrors()
+-- the ticked ids, sorted
+local function pickedIds(c)
+    local out = {}
+    for id in pairs(c.schedPicked or {}) do out[#out + 1] = id end
+    table.sort(out)
+    return out
 end
 
--- button titles and enable state; called from Console:updateButtons
+-- confirms, then sends cmd for the selected row
+local function press(c, ask, cmd)
+    local id = c.schedSel
+    local s = id and find(id)
+    if not s then return end
+    T.confirm(ask .. " " .. tostring(s.name) .. "?", function()
+        c.serverErrs = {}
+        Net.send(cmd, { id = id })
+        c:applyErrors()
+    end)
+end
+
+-- confirms the count, then sends one bulkSchedule for every ticked row
+local function bulk(c, action, ask)
+    local ids = pickedIds(c)
+    if #ids == 0 then return end
+    T.confirm(ask .. " " .. #ids .. " selected schedule(s)?", function()
+        c.serverErrs = {}
+        Net.send("bulkSchedule", { ids = ids, action = action })
+        c:applyErrors()
+    end)
+end
+
+-- vanilla number box, default 5; the answer is held to 1..50 (the server checks it again)
+local function generate(c)
+    local m = ISTextBox:new(0, 0, 320, 180, "How many random schedules to add? (1 to 50)", "5", nil, function(_, b)
+        if b.internal ~= "OK" then return end
+        local n = math.max(1, math.min(MAX_SCHEDULES, math.floor(tonumber(b.parent.entry:getText()) or 5)))
+        T.confirm("Add " .. n .. " random schedule(s)? Existing entries stay as they are.", function()
+            c.serverErrs = {}
+            Net.send("generateSchedules", { count = n })
+            c:applyErrors()
+        end)
+    end)
+    m:initialise()
+    m:setOnlyNumbers(true)
+    m:addToUIManager()
+    m:bringToTop()
+end
+
+-- button enable state; called from Console:updateButtons
 function P.refresh(c)
     local b = c.sBtns
     if not b then return end
-    local sel, a = c.schedSel, c.sArm
-    local function hot(kind) return a ~= nil and a.kind == kind and a.id == sel end
-    b.del:setTitle(hot("del") and "CONFIRM?" or "Delete")
-    b.run:setTitle(hot("run") and "CONFIRM?" or "Run Now")
-    b.gen:setTitle(a ~= nil and a.kind == "gen" and "CONFIRM?" or "Generate Random")
-    setOn(b.edit, sel ~= nil)
-    setOn(b.del, sel ~= nil)
-    setOn(b.run, sel ~= nil)
+    local sel, many = c.schedSel ~= nil, #pickedIds(c) > 0
+    setOn(b.edit, sel)
+    setOn(b.del, sel)
+    setOn(b.run, sel)
+    setOn(b.en, many)
+    setOn(b.dis, many)
+    setOn(b.delSel, many)
 end
 
 local function eventTitle(id)
@@ -191,38 +221,68 @@ end
 -- the table view
 function P.list(c, f, view, y)
     local list = entries()
-    local ok = false
-    for _, r in ipairs(list) do if r.id == c.schedSel then ok = true end end
+    local ok, picked = false, {}
+    for _, r in ipairs(list) do
+        if r.id == c.schedSel then ok = true end
+        if c.schedPicked and c.schedPicked[r.id] then picked[r.id] = true end
+    end
     if not ok then c.schedSel = nil end
+    c.schedPicked = picked -- ids of deleted entries drop out
+    local vw = view:getWidth()
     local b = {}
     c.sBtns = b
-    b.new = f:button("New", 12, y, 60, function() P.open(c, nil) end)
-    b.edit = f:button("Edit", 78, y, 60, function()
+    local x = 12
+    local function add(label, w, fn)
+        local btn = f:button(label, x, y, w, fn)
+        if x > 12 and x + btn:getWidth() > vw - 24 then -- wraps to a second line when the view is narrow
+            x, y = 12, y + T.bh() + 4
+            btn:setX(x)
+            btn:setY(y)
+        end
+        x = x + btn:getWidth() + 6
+        return btn
+    end
+    b.new = add("New", 50, function() P.open(c, nil) end)
+    b.edit = add("Edit", 50, function()
         local s = c.schedSel and find(c.schedSel)
         if s then P.open(c, { id = c.schedSel, name = s.name, eventId = s.eventId, preset = s.preset,
             enabled = s.enabled, schedule = s.schedule, conditions = s.conditions }) end
     end)
-    b.del = f:button("Delete", 144, y, 76, function() press(c, "del", "deleteSchedule") end)
-    b.run = f:button("Run Now", 226, y, 84, function() press(c, "run", "runSchedule") end)
-    b.gen = f:button("Generate Random", 316, y, 130, function()
-        local a = c.sArm
-        if a and a.kind == "gen" and now() < a.till then
-            c.sArm = nil
-            Net.send("generateSchedules", {})
-        else
-            c.sArm = { kind = "gen", till = now() + ARM_MS }
-        end
-        c:applyErrors()
-    end)
-    f:help(GEN_HELP, 452, y)
-    y = y + 34
-    local vw = view:getWidth()
-    local X = { name = 54, sched = 158, ev = 338, pre = 422, nxt = 526 }
-    local W = { name = 98, sched = 176, ev = 80, pre = 100, nxt = math.max(40, vw - 36 - X.nxt) }
+    b.del = add("Delete", 60, function() press(c, "Delete", "deleteSchedule") end)
+    b.run = add("Run Now", 70, function() press(c, "Run", "runSchedule") end)
+    b.gen = add("Generate Random", 110, function() generate(c) end)
+    b.en = add("Enable", 60, function() bulk(c, "enable", "Enable") end)
+    b.dis = add("Disable", 60, function() bulk(c, "disable", "Disable") end)
+    b.delSel = add("Delete Selected", 110, function() bulk(c, "delete", "Delete") end)
+    b.gen.tooltip = GEN_HELP
+    y = y + T.bh() + 12
+    -- columns from the view width. A 24 px select column leads and a 36 px On column trails; Next keeps its
+    -- width and the four text columns share what is left, so the Schedule column shrinks first
+    local LEAD, TRAIL, GAP = 24, 36, 6
+    local rh = math.max(RH, T.fh() + 8)
+    local nxtW = 40
+    for _, r in ipairs(list) do nxtW = math.max(nxtW, T.tw(tostring(r.s.next or "-")) + 4) end
+    local x0 = 12 + LEAD
+    local body = math.max(100, vw - 36 - TRAIL - x0 + 12) - nxtW -- shared by the four text columns
+    local share = { name = 22, sched = 38, ev = 18, pre = 22 }
+    local X, W, cx = {}, {}, x0
+    for _, k in ipairs({ "name", "sched", "ev", "pre" }) do
+        W[k] = math.max(20, math.floor(body * share[k] / 100) - GAP)
+        X[k], cx = cx, cx + W[k] + GAP
+    end
+    X.nxt, W.nxt = cx, nxtW
     local hy = y
-    f:help(ON_HELP, 32, hy - 2) -- the "On" header is 12..28 wide, so the ? sits just right of it
-    y = y + 24
+    local ox = vw - 24 - TRAIL -- the On column; its header carries the hover help
+    f:hlabel("On", ox, hy, T.c.dim, ON_HELP)
+    y = y + math.max(24, T.fh() + 8)
     local top = y
+    local all = #list > 0
+    for _, r in ipairs(list) do if not picked[r.id] then all = false end end
+    f:tick("pickAll", 12, hy, all, function(on)
+        c.schedPicked = {}
+        if on then for _, r in ipairs(list) do c.schedPicked[r.id] = true end end
+        c.rebuildNext = true
+    end)
     local rows = {}
     if #list > 0 then -- two sections: entries with a random time, then those on a fixed time
         for sec, title in ipairs({ "Random Events", "Scheduled Events" }) do
@@ -235,17 +295,20 @@ function P.list(c, f, view, y)
     for i, r in ipairs(rows) do
         if not r.head then
             local s, id = r.s, r.id
-            f:tick("sched", 12, top + (i - 1) * RH, s.enabled == true, function(on)
+            f:tick("pick", 12, top + (i - 1) * rh, picked[id] == true, function(on)
+                picked[id] = on or nil
+                c.rebuildNext = true
+            end)
+            f:tick("sched", ox + 8, top + (i - 1) * rh, s.enabled == true, function(on)
                 c.serverErrs = {}
                 Net.request("saveSchedule", P.payload(id, P.draftOf(s), on))
             end)
         end
     end
     view.onMouseDown = function(_, mx, my)
-        local i = math.floor((my - top) / RH) + 1
+        local i = math.floor((my - top) / rh) + 1
         local r = rows[i]
         if r and not r.head then
-            if c.schedSel ~= r.id then c.sArm = nil end
             c.schedSel = r.id
             c:updateButtons()
         end
@@ -255,40 +318,33 @@ function P.list(c, f, view, y)
     f.draw = function(self)
         base(self)
         local col = T.c
-        T.text(view, "On", 12, hy, col.dim)
         T.text(view, "Name", X.name, hy, col.dim)
         T.text(view, "Schedule", X.sched, hy, col.dim)
         T.text(view, "Event", X.ev, hy, col.dim)
         T.text(view, "Preset", X.pre, hy, col.dim)
         T.text(view, "Next", X.nxt, hy, col.dim)
-        T.rect(view, 12, hy + 18, vw - 36, 1, col.line)
+        T.rect(view, 12, hy + math.max(18, T.fh() + 4), vw - 36, 1, col.line)
         if #list == 0 then T.text(view, SEM.t("noschedules", "No schedules yet. Press New."), 12, top, col.dim) end
         for i, r in ipairs(rows) do
-            local yy = top + (i - 1) * RH + 3
+            local yy = top + (i - 1) * rh + 3 + math.floor((rh - RH) / 2)
             if r.head then
                 T.text(view, r.head, 12, yy, col.hot)
             else
                 local s = r.s
                 local sel = r.id == c.schedSel
-                if sel then T.rect(view, 8, yy - 3, vw - 34, RH - 2, col.line, 0.4) end
+                if sel then T.rect(view, 8, yy - 3, vw - 34, rh - 2, col.line, 0.4) end
                 local tc = sel and col.hot or (s.enabled == true and col.amber or col.dim)
                 T.text(view, T.fit(tostring(s.name), W.name), X.name, yy, tc)
                 T.text(view, T.fit(P.summary(s.schedule), W.sched), X.sched, yy, tc)
                 T.text(view, T.fit(eventTitle(s.eventId), W.ev), X.ev, yy, tc)
-                local pre = (s.preset and s.preset ~= "") and s.preset or "-"
+                local pre = (s.preset and s.preset ~= "") and s.preset or USE_SAVED
                 T.text(view, T.fit(pre, W.pre), X.pre, yy, tc)
                 T.text(view, T.fit(tostring(s.next or "-"), W.nxt), X.nxt, yy, tc)
             end
         end
     end
     P.refresh(c)
-    return top + math.max(1, #rows) * RH + 8
-end
-
--- clears an expired arm; true when it changed
-function P.expire(c)
-    if c.sArm and now() > c.sArm.till then c.sArm = nil; return true end
-    return false
+    return top + math.max(1, #rows) * rh + 8
 end
 
 return P

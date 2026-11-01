@@ -1,7 +1,7 @@
 -- Server Event Manager: the table picker, used wherever an asset is chosen. Search, category filter, list on the left, what is
 -- chosen on the right. Open with SEM.LootPicker.open(title, value, onApply, kind, filter). Kinds (KINDS below):
 -- loot (default, D28): value and result are rows { item, chance, min, max }; vehicle: a list of ids;
--- outfit, player, base, pack, lootPack: one id ("" for none). filter narrows the base kind to one of safehouse, jeem, home.
+-- outfit, player, base: one id; pack, lootPack: a list of up to 10 pack names. filter narrows the base kind to one of safehouse, jeem, home.
 if isServer() then return end
 require "ISUI/ISPanel"
 require "ISUI/ISButton"
@@ -18,6 +18,7 @@ local P = ISPanel:derive("SEM_LootPicker")
 SEM.LootPicker = P
 
 local CAP, PAUSE_MS, MAXROWS, RH, RANDOM_ADD = 500, 250, 100, 26, 5
+local MINW, MINH = 640, 420 -- below this the item columns and the buttons overlap
 local FIELD = { { key = "lootTable", type = "lootTable", default = {} } }
 
 local function now() return getTimestampMs() end
@@ -149,13 +150,16 @@ local KINDS = {
     outfit = { catalog = outfits, head = "Pick Outfit", noun = "outfits", single = true },
     player = { catalog = players, head = "Pick Player", noun = "players online", single = true },
     base = { catalog = bases, head = "Pick Base", noun = "bases", single = true },
-    pack = { catalog = packsOf("vehiclePacks"), head = "Pick Vehicle Pack", noun = "packs", single = true },
-    lootPack = { catalog = packsOf("lootPacks", true), head = "Pick Loot Pack", noun = "packs", single = true },
+    pack = { catalog = packsOf("vehiclePacks"), head = "Pick Vehicle Packs", noun = "packs", max = 10 },
+    lootPack = { catalog = packsOf("lootPacks", true), head = "Pick Loot Packs", noun = "packs", max = 10 },
 }
 
 function P:new(title, value, onDone, kind, filter)
     local sw, sh = getCore():getScreenWidth(), getCore():getScreenHeight()
-    local w, h = math.min(760, sw - 20), math.min(520, sh - 20)
+    local sw0, sh0 = T.loadSize("semPick")
+    local w, h = math.min(sw0 or 760, sw), math.min(sh0 or 520, sh)
+    if not sw0 then w, h = math.min(760, sw - 20), math.min(520, sh - 20) end
+    w, h = math.max(w, math.min(MINW, sw)), math.max(h, math.min(MINH, sh))
     local o = ISPanel.new(self, math.floor((sw - w) / 2), math.floor((sh - h) / 2), w, h)
     o.backgroundColor, o.borderColor, o.moveWithMouse = T.c.bg, T.c.line, true
     o.title, o.onDone, o.rows, o.kind, o.filter = title, onDone, {}, KINDS[kind or "loot"], filter
@@ -164,9 +168,6 @@ function P:new(title, value, onDone, kind, filter)
         if type(r) == "table" then o.rows[#o.rows + 1] = { item = tostring(r.item), chance = r.chance, min = r.min, max = r.max }
         else o.rows[#o.rows + 1] = { item = tostring(r) } end
     end
-    o.lw = math.floor((w - 36) / 2)
-    o.rx = 24 + o.lw
-    o.rw = w - o.rx - 12
     o.msg, o.bad, o.shown, o.matched, o.lastText = "", false, 0, 0, ""
     o.due, o.rebuild = now(), true
     return o
@@ -174,11 +175,12 @@ end
 
 function P:initialise()
     ISPanel.initialise(self)
+    self:metrics()
     local lw, h = self.lw, self.height
     local cat = self.kind.catalog(self.filter)
     self.cat = cat
 
-    local e = ISTextEntryBox:new("", 12, 40, lw, 22)
+    local e = ISTextEntryBox:new("", 12, self.m.top, lw, self.m.bh)
     e.font = T.font.small
     e:initialise()
     e:instantiate()
@@ -187,7 +189,7 @@ function P:initialise()
     T.input(e, false)
     self.search = e
 
-    local c = ISComboBox:new(12, 68, lw, 22, nil, function() self.due = now() end)
+    local c = ISComboBox:new(12, self.m.comboY, lw, self.m.bh, nil, function() self.due = now() end)
     c:initialise()
     for _, name in ipairs(cat.cats) do c:addOption(name) end
     c.selected = 1
@@ -195,7 +197,7 @@ function P:initialise()
     self:addChild(c)
     self.combo = c
 
-    local l = ISScrollingListBox:new(12, 116, lw, h - 116 - 82)
+    local l = ISScrollingListBox:new(12, self.m.listY, lw, self.m.listH)
     l:initialise()
     l:instantiate()
     l:setFont(T.font.small, 3)
@@ -207,30 +209,73 @@ function P:initialise()
     self:addChild(l)
     self.list = l
 
-    self.addBtn = T.btn("Add", 12, h - 72, 80, self, P.onAdd)
+    self.addBtn = T.btn("Add", 12, self.m.addY, 80, self, P.onAdd)
     if not self.kind.single then
-        self.rndBtn = T.btn("Add " .. RANDOM_ADD .. " Random", 100, h - 72, 120, self, P.onRandom)
+        self.rndBtn = T.btn("Add " .. RANDOM_ADD .. " Random", 100, self.m.addY, 120, self, P.onRandom)
         self:addChild(self.rndBtn)
-        local tip = SEM.Form.helpButton("Adds " .. RANDOM_ADD .. " random rows from the list on the left, so narrow it with the search or filter first. Press again for more.", 226, h - 70)
+        local tip = SEM.Form.helpButton("Adds " .. RANDOM_ADD .. " random rows from the list on the left, so narrow it with the search or filter first. Press again for more.", 226, self.m.addY + 2)
         self:addChild(tip)
         self.rndTip = tip
     end
-    self.applyBtn = T.btn("Apply", 12, h - 34, 90, self, P.onApply)
-    self.cancelBtn = T.btn("Cancel", 110, h - 34, 90, self, P.close)
+    self.applyBtn = T.btn("Apply", 12, self.m.by, 90, self, P.onApply)
+    self.cancelBtn = T.btn("Cancel", 110, self.m.by, 90, self, P.close)
     for _, b in ipairs({ self.addBtn, self.applyBtn, self.cancelBtn }) do self:addChild(b) end
 
     -- one "?" above each column header, centred over its box
     local ncw = self.rw - 188
-    self.tips = {}
+    self.tips, self.tipOff = {}, {}
     for _, t in ipairs(self.kind.cols and {
         { ncw + 21, "Percent chance, 0 to 100, that this item is added each time the crate is filled. 100 always adds it." },
         { ncw + 67, "Fewest of this item added when it is chosen, a whole number from 0. Not above Max." },
         { ncw + 111, "Most of this item added when it is chosen. A count between Min and Max is picked each time." },
     } or {}) do
-        local b = SEM.Form.helpButton(t[2], self.rx + t[1], 40)
+        local b = SEM.Form.helpButton(t[2], self.rx + t[1], self.m.top)
         self:addChild(b)
         self.tips[#self.tips + 1] = b
+        self.tipOff[#self.tips] = t[1] - ncw
     end
+    T.grip(self, MINW, MINH)
+    self:layout()
+end
+
+-- every y position and column x, from the current size and font
+function P:metrics()
+    local w, h, fh, bh = self.width, self.height, T.fh(), T.bh()
+    local tip = math.max(18, fh + 4)
+    local m = { bh = bh, hdr = math.max(30, T.fh(T.font.med) + 8) }
+    m.top = m.hdr + 10
+    m.comboY = m.top + bh + 6
+    m.countY = m.comboY + bh + 6
+    m.listY = m.countY + math.max(20, fh + 6)
+    m.by = h - bh - 12
+    m.addY = m.by - bh - 16
+    m.listH = m.addY - 10 - m.listY
+    m.colY = m.top + math.max(22, tip + 4)
+    m.viewY = m.colY + math.max(18, fh + 4)
+    m.viewH = m.by - 16 - m.viewY
+    self.m = m
+    self.lw = math.floor((w - 36) / 2)
+    self.rx = 24 + self.lw
+    self.rw = w - self.rx - 12
+end
+
+-- positions everything from self.width and self.height; the selected-items view is rebuilt after the drag ends
+function P:layout()
+    self:metrics()
+    local m = self.m
+    self.search:setWidth(self.lw)
+    self.combo:setWidth(self.lw)
+    self.list:setY(m.listY); self.list:setWidth(self.lw); self.list:setHeight(m.listH)
+    for _, b in ipairs({ self.addBtn, self.rndBtn }) do b:setY(m.addY) end
+    if self.rndTip then self.rndTip:setY(m.addY + 2) end
+    for _, b in ipairs({ self.applyBtn, self.cancelBtn }) do b:setY(m.by) end
+    local ncw = self.rw - 188
+    for i, b in ipairs(self.tips) do b:setX(self.rx + ncw + self.tipOff[i]) end
+    if self.view then
+        self.view:setX(self.rx); self.view:setY(m.viewY); self.view:setWidth(self.rw); self.view:setHeight(m.viewH)
+    end
+    T.placeGrip(self)
+    self.laidW, self.laidH, self.sizeDirty = self.width, self.height, true
 end
 
 function P:say(text, bad) self.msg, self.bad = text, bad == true end
@@ -322,12 +367,13 @@ end
 function P:buildRows()
     local keep = self.view and self.view:getYScroll() or 0
     if self.view then self:removeChild(self.view) end
-    local v = T.scroller(self.rx, 80, self.rw, self.height - 130)
+    local v = T.scroller(self.rx, self.m.viewY, self.rw, self.m.viewH)
     local f = SEM.Form.new(v, function() end)
     local ncw, cols = self.rw - 188, self.kind.cols
     if not cols then ncw = self.rw - 44 end
+    local rh = math.max(RH, T.bh() + 4)
     for i, r in ipairs(self.rows) do
-        local y = 4 + (i - 1) * RH
+        local y = 4 + (i - 1) * rh
         f.marks[#f.marks + 1] = { T.fit(i .. ". " .. (self.cat.names[r.item] or r.item), ncw), 4, y + 3, T.c.amber }
         if cols then
             f:entry("c" .. i, ncw + 8, y, 44, r.chance, function(t) r.chance = num(t) end)
@@ -339,7 +385,7 @@ function P:buildRows()
     if #self.rows == 0 then
         f.marks[1] = { "Nothing selected. Double-click a row, or pick one and press Add.", 4, 8, T.c.dim }
     end
-    local endY = 4 + #self.rows * RH
+    local endY = 4 + #self.rows * rh
     f:finish(endY)
     local most = math.max(0, endY + 12 - v:getHeight())
     keep = self.toBottom and -most or math.max(-most, math.min(0, keep))
@@ -356,6 +402,9 @@ function P:prerender()
     if x ~= self.x then self:setX(x) end
     if y ~= self.y then self:setY(y) end
     if self.form then self.form:poll() end
+    if self.laidW ~= self.width or self.laidH ~= self.height then self:layout() end
+    if self.sizeDirty and not self.grip.resizing then self.sizeDirty, self.rebuild = false, true end
+    T.saveSize(self, "semPick")
     if self.rebuild then self.rebuild = false; self:buildRows() end
     -- the box updates after onTextChange fires, so read it here and refilter after a pause in typing
     local t = self.search:getText()
@@ -366,25 +415,27 @@ end
 
 function P:render()
     local c, w, h = T.c, self.width, self.height
-    T.rect(self, 1, 1, w - 2, 30, c.panel)
-    T.rect(self, 0, 31, w, 1, c.line)
+    local m = self.m
+    T.rect(self, 1, 1, w - 2, m.hdr, c.panel)
+    T.rect(self, 0, m.hdr + 1, w, 1, c.line)
     local k = self.kind
-    T.text(self, T.fit(k.head .. ": " .. tostring(self.title), w - 24), 12, 6, c.amber, T.font.med)
+    T.text(self, T.fit(k.head .. ": " .. tostring(self.title), w - 24), 12, math.floor((m.hdr - T.fh(T.font.med)) / 2) + 1, c.amber, T.font.med)
     local count
     if #self.cat.list == 0 then count = "Nothing to list: no " .. k.noun .. "."
     elseif self.matched > self.shown then count = self.matched .. " " .. k.noun .. ", showing the first " .. self.shown .. ". Refine your search."
     else count = self.matched .. " " .. k.noun end
-    T.text(self, count, 12, 96, c.dim)
-    T.text(self, k.single and "Selected" or ("Selected (" .. #self.rows .. " of " .. k.max .. ")"), self.rx, 40, c.hot)
+    T.text(self, count, 12, m.countY, c.dim)
+    T.text(self, k.single and "Selected" or ("Selected (" .. #self.rows .. " of " .. k.max .. ")"), self.rx, m.top, c.hot)
     if k.cols then
         local ncw = self.rw - 188
-        T.text(self, "Item", self.rx + 4, 62, c.dim)
-        T.text(self, "Chance %", self.rx + ncw + 4, 62, c.dim)
-        T.text(self, "Min", self.rx + ncw + 56, 62, c.dim)
-        T.text(self, "Max", self.rx + ncw + 100, 62, c.dim)
+        T.text(self, "Item", self.rx + 4, m.colY, c.dim)
+        T.text(self, "Chance %", self.rx + ncw + 4, m.colY, c.dim)
+        T.text(self, "Min", self.rx + ncw + 56, m.colY, c.dim)
+        T.text(self, "Max", self.rx + ncw + 100, m.colY, c.dim)
     end
-    T.rect(self, 0, h - 44, w, 1, c.line)
-    T.text(self, T.fit(self.msg, w - 222), 210, h - 30, self.bad and c.red or c.dim)
+    T.rect(self, 0, m.by - 10, w, 1, c.line)
+    T.text(self, T.fit(self.msg, w - 222), 210, m.by + math.floor((m.bh - T.fh()) / 2), self.bad and c.red or c.dim)
+    T.drawGrip(self)
 end
 
 -- one picker at a time; a new one replaces the old

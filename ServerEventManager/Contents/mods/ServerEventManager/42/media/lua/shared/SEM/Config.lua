@@ -4,6 +4,7 @@ SEM = SEM or {}
 SEM.Config = {
     MODULE = "ServerEventManager",
     VERSION = 1,
+    SCHEMA = 3,                -- saved config layout; Store.migrate upgrades older ones
     CONFIG_KEY = "ServerEventManager.Config",
     WORLD_KEY = "ServerEventManager.World",
     MAX_ZOMBIES_PER_EVENT = 200,
@@ -48,6 +49,10 @@ SEM.Config = {
     HUNT_REACH = 100,          -- with no hunter this close, the player got away for now
     EVENT_AREA = 100,          -- with no player this close to an event's site and targets, its Leave Minutes run. Inside the ground the server keeps loaded
     MAX_PACKS = 30,            -- loot packs, and vehicle packs, a server may keep
+    QUEUE_MAX = 10,            -- scheduled starts that may wait for a free slot
+    EVENT_GAP = 60,            -- real seconds between one queued event starting and the next
+    ALERT_GAP = 8,             -- real seconds between one banner starting and the next
+    FLYOVER_SECONDS = 10,      -- the airdrop helicopter sound plays this long once the crates are down
     RING_MIN = 150, RING_MAX = 600, SAMPLES = 200, -- countryside search around a player
 }
 

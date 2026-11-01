@@ -5,6 +5,7 @@ require "ISUI/ISButton"
 require "ISUI/ISTextEntryBox"
 require "ISUI/ISTickBox"
 require "ISUI/ISComboBox"
+require "ISUI/ISLabel"
 require "SEM/Theme"
 require "SEM/Fmt"
 require "SEM/MapPick"
@@ -15,11 +16,15 @@ local Form = {}
 Form.__index = Form
 SEM.Form = Form
 
-local LX, CX, H = 12, 190, 22
+local LX, H = 12, 22
+local PAD = 14 -- gap between the label column and the controls
+local CTL = 190 -- widest ordinary control; the label column never squeezes it off a narrow view
+local HEAD = 22 -- heading step; both grow with the font (set in Form.new)
 
 -- view: a Theme.scroller. onChange(structural): structural means the layout must be rebuilt
 function Form.new(view, onChange)
-    local f = setmetatable({ view = view, onChange = onChange, ctl = {}, entries = {}, labels = {}, tips = {}, heads = {}, marks = {}, errs = {}, notes = {} }, Form)
+    H, HEAD = T.bh(), math.max(22, T.fh() + 8)
+    local f = setmetatable({ view = view, onChange = onChange, ctl = {}, entries = {}, labels = {}, tips = {}, heads = {}, marks = {}, errs = {}, notes = {}, cx = 120 }, Form)
     view.draw = function() f:draw() end
     return f
 end
@@ -29,26 +34,61 @@ local function nice(key)
     return SEM.t("opt_" .. key, s:sub(1, 1):upper() .. s:sub(2))
 end
 
--- small "?" with a vanilla tooltip (ISButton:updateTooltip). It has no click handler and sits
--- left of the control column, so it never covers a field.
+-- Hover help is vanilla's own: an ISLabel (or any control) carrying .tooltip shows an ISToolTip while the
+-- mouse is over it (ISLabel:updateTooltip, as in ISServerSandboxOptionsUI). ISToolTip hides itself when its
+-- owner leaves the screen, so a rebuilt view needs no clean-up.
+function Form:tip(ctl, text)
+    if ctl and text then ctl.tooltip = ctl.Type == "ISComboBox" and { defaultTooltip = text } or text end -- only combos take a table; tick boxes also have .options
+    return ctl
+end
+
+-- the strings a schema puts in the label column
+function Form.labels(schema)
+    local out = {}
+    for _, f in ipairs(schema) do out[#out + 1] = nice(f.key) end
+    return out
+end
+
+-- sizes the label column from the longest label on the page (lists of strings), like vanilla's labelWidth,
+-- capped so a CTL-wide control still fits; call before adding any field
+function Form:measure(...)
+    local w = 0
+    for _, list in ipairs({ ... }) do
+        for _, s in ipairs(list) do w = math.max(w, T.tw(s)) end
+    end
+    local cap = math.max(LX + 100, self.view:getWidth() - CTL - 24)
+    self.cx = math.min(LX + w + PAD, cap)
+end
+
+-- a control width that still fits right of the label column
+function Form:cw(w) return math.max(80, math.min(w, self.view:getWidth() - self.cx - 24)) end
+
+-- a column header or other short text with a hover tooltip
+function Form:hlabel(text, x, y, color, help)
+    local l = ISLabel:new(x, y, T.fh(), text, color.r, color.g, color.b, 1, T.font.small, true)
+    l.tooltip = help
+    self.view:addChild(l)
+    return l
+end
+
+-- dim wrapped paragraph; returns the next y
+function Form:para(text, y)
+    local step = T.fh() + 2
+    for _, line in ipairs(T.wrap(text, self.view:getWidth() - 36)) do
+        table.insert(self.marks, { line, LX, y, T.c.dim })
+        y = y + step
+    end
+    return y + 4
+end
+
+-- a small dim "(?)" that shows text on hover through the vanilla tooltip; the table picker uses it, having no labels to hang help on
 function Form.helpButton(text, x, y)
-    local b = ISButton:new(x, y, 18, 18, "?", nil, nil)
-    b:initialise()
-    b:instantiate()
-    b.font = T.font.small
-    b.textColor = T.c.dim
-    b.tooltip = text
-    return b
+    local c = T.c.dim
+    local l = ISLabel:new(x, y, T.fh(), "(?)", c.r, c.g, c.b, 1, T.font.small, true)
+    l.tooltip = text
+    return l
 end
 
-function Form:help(text, x, y)
-    if not text then return end
-    local b = Form.helpButton(text, x, y + 2)
-    self.view:addChild(b)
-    self.tips[#self.tips + 1] = b
-end
-
--- hides open tooltips; call before the view is thrown away, since a hovered "?" never gets to hide its own
 function Form:closeTips()
     for _, b in ipairs(self.tips) do
         local u = b.tooltipUI
@@ -123,14 +163,24 @@ function Form:button(label, x, y, w, fn)
     return b
 end
 
-function Form:label(text, y, key, ex, ey)
-    table.insert(self.labels, { text = text, y = y + 3, key = key, ex = ex, ey = ey })
+function Form:label(text, y, key, ex, ey, help)
+    local l = { text = text, y = y + 3, key = key, ex = ex, ey = ey }
+    if text ~= "" then
+        local lw = self.cx - LX - 8
+        local c = T.c.amber
+        l.ui = ISLabel:new(LX, y + 3, T.fh(), T.fit(text, lw), c.r, c.g, c.b, 1, T.font.small, true)
+        l.ui:setWidth(lw) -- the whole column answers the hover
+        l.ui.tooltip = help
+        self.view:addChild(l.ui)
+    end
+    table.insert(self.labels, l)
 end
 
 local BASE_FILTER = { chosenSafehouse = "safehouse", chosenJeemBase = "jeem", aLifeHome = "home" }
 
 -- an asset chosen in the table picker: Pick, Clear and the current choice
 function Form:pick(f, values, k, key, y)
+    local CX = self.cx
     local function apply(v)
         -- a snapshot may have replaced the draft while the picker was open; apply to the current one
         local cur = self.resolve and self.resolve() or values
@@ -140,12 +190,13 @@ function Form:pick(f, values, k, key, y)
     self:button("Pick", CX, y, 50, function()
         SEM.LootPicker.open(nice(k), values[k], apply, f.picker, f.picker == "base" and BASE_FILTER[values.targetType] or nil)
     end)
-    self:button("Clear", CX + 56, y, 50, function() apply("") end)
+    self:button("Clear", CX + 56, y, 50, function() apply(f.type == "packList" and {} or "") end)
     local v = SEM.Fmt.packLabel(values[k] or "")
     table.insert(self.marks, { T.fit(v ~= "" and v or "Not set", self.view:getWidth() - CX - 150), CX + 114, y + 3, v ~= "" and T.c.amber or T.c.dim })
 end
 
 function Form:location(key, values, k, y)
+    local CX = self.cx
     local loc = values[k] or {}
     local txt = { x = loc.x or "", y = loc.y or "", z = loc.z or "" }
     local function upd()
@@ -172,31 +223,31 @@ end
 function Form:field(f, values, y, prefix, struct)
     local k, key = f.key, prefix .. "." .. f.key
     local function set(v) values[k] = v; self.onChange(struct[k] == true) end
+    local CX = self.cx
     local ex, h = CX + 130, H + 4
     local ty = f.type
-    self:help(f.help, CX - 22, y)
     if f.picker then
         self:pick(f, values, k, key, y)
         ex = CX + 120
     elseif ty == "bool" then
-        self:tick(key, CX, y, values[k], set)
+        self:tip(self:tick(key, CX, y, values[k], set), f.help)
         ex = CX + 30
     elseif ty == "int" or ty == "float" then
-        self:entry(key, CX, y, 100, values[k], function(t) set(num(t)) end)
+        self:tip(self:entry(key, CX, y, 100, values[k], function(t) set(num(t)) end), f.help)
     elseif ty == "string" then
-        self:entry(key, CX, y, 190, values[k], set)
+        self:tip(self:entry(key, CX, y, 190, values[k], set), f.help)
         ex = CX + 198
     elseif ty == "enum" then
         local names = {}
         for i, v in ipairs(f.choices or {}) do names[i] = SEM.Fmt.label(f, v) end
-        self:combo(key, CX, y, 170, f.choices or {}, values[k], set, names)
+        self:tip(self:combo(key, CX, y, 170, f.choices or {}, values[k], set, names), f.help)
         ex = CX + 178
     elseif ty == "location" then
-        self:label(nice(k), y, key, CX, y + H + 2)
+        self:label(nice(k), y, key, CX, y + H + 2, f.help)
         self:location(key, values, k, y)
         return y + H + 22
     end
-    self:label(nice(k), y, key, ex, y)
+    self:label(nice(k), y, key, ex, y, f.help)
     return y + h
 end
 
@@ -218,7 +269,7 @@ function Form:addFields(schema, values, y, prefix)
         if #groups[g] > 0 then
             if g ~= "" then
                 table.insert(self.heads, { SEM.t("grp_" .. g, g), y })
-                y = y + 22
+                y = y + HEAD
             end
             for _, f in ipairs(groups[g]) do y = self:field(f, values, y, prefix, struct) end
             y = y + 4
@@ -229,10 +280,15 @@ end
 
 function Form:setErrors(errs)
     self.errs = errs or {}
+    for _, l in ipairs(self.labels) do
+        if l.ui then local c = self.errs[l.key] and T.c.red or T.c.amber; l.ui:setColor(c.r, c.g, c.b) end
+    end
     for key, list in pairs(self.ctl) do
         for _, c in ipairs(list) do T.input(c, self.errs[key] ~= nil) end
     end
 end
+
+Form.nice = nice
 
 function Form:finish(y) self.view:setScrollHeight(y + 12) end
 
@@ -240,11 +296,10 @@ function Form:draw()
     local v, c = self.view, T.c
     for _, h in ipairs(self.heads) do
         T.text(v, h[1], LX, h[2], c.hot, T.font.small)
-        T.rect(v, LX, h[2] + 18, v:getWidth() - 36, 1, c.line)
+        T.rect(v, LX, h[2] + HEAD - 4, v:getWidth() - 36, 1, c.line)
     end
     for _, l in ipairs(self.labels) do
         local bad = self.errs[l.key]
-        T.text(v, l.text, LX, l.y, bad and c.red or c.amber)
         if bad then T.text(v, bad, l.ex, l.ey or l.y, c.red) end
         if self.notes[l.key] then T.text(v, self.notes[l.key], LX + 100, l.y, c.dim) end
     end

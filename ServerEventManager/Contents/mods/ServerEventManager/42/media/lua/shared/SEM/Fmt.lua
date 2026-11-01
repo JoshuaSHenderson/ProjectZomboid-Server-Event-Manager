@@ -133,6 +133,11 @@ end
 
 -- display text for a pack option's value
 function Fmt.packLabel(v)
+    if type(v) == "table" then
+        local out = {}
+        for i, n in ipairs(v) do out[i] = Fmt.packLabel(n) end
+        return table.concat(out, ", ")
+    end
     if v == "random" then return "Random pack" end
     local tier = tostring(v):match("^random:(%a+)$")
     if tier then return "Random " .. Fmt.title(tier) .. " Tier" end

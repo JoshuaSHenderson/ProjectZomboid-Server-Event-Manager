@@ -1,14 +1,18 @@
--- Server Event Manager: presets tab. List, name box, Save As, Load, Delete (two-step).
+-- Server Event Manager: the preset selector and name box at the top of an event page (D39).
+-- Default is the event's own settings; "" stands for a new, unsaved preset.
 if isServer() then return end
 require "SEM/Theme"
 require "SEM/Net"
 require "SEM/Fmt"
 
-local T, F = SEM.Theme, SEM.Fmt
+local T = SEM.Theme
 local P = {}
 SEM.Presets = P
 
-local ROW = 22
+P.DEFAULT = "Default"
+
+local function trim(s) return (tostring(s or ""):match("^%s*(.-)%s*$")) end
+P.trim = trim
 
 local function names(id)
     local out, cfg = {}, SEM.Net.snapshot and SEM.Net.snapshot.config
@@ -21,60 +25,46 @@ end
 
 P.names = names
 
--- c is the console; draws on top of Form's own draw
-function P.build(c, form, view, y)
-    local id, list = c.def.id, names(c.def.id)
-    -- Form:entry polls the text each frame (onTextChange fires before the box updates). Console:build
-    -- puts focus back after a rebuild, and presetName keeps the text.
-    local e = form:entry("presetName", 12, y, 190, c.presetName or "", function(t) c.presetName = t end)
-    c.nameBox = e
-    form:button("Save As", 208, y, 66, function()
-        local n = (e:getText() or ""):match("^%s*(.-)%s*$") or ""
-        if n == "" then SEM.Net.line("Preset needs a name", true) return end
-        SEM.Net.send("savePreset", { id = id, name = n, options = F.copy(c.drafts[id].options) })
-        e:setText("")
-        c.presetName = ""
-    end)
-    form:button("Load", 280, y, 50, function()
-        if not c.presetSel then return end
-        -- fills the draft only; nothing changes on the server until Save
-        local snap = SEM.Net.snapshot
-        local p = snap and snap.config and snap.config.presets and snap.config.presets[c.presetSel]
-        local d = c:cur()
-        if p and p.options and d then
-            d.options = SEM.Fmt.copy(p.options)
-            c:changed(true)
-        end
-    end)
-    c.delBtn = form:button("Delete", 336, y, 70, function() c:onDelete() end)
-    form:help("Type a name and press Save As to keep this event's current options as a preset. Click a name in the list, then Load puts those options on the page (Save keeps them) or Delete removes it.", 412, y)
-    y = y + 34
-    local top = y
-    view.onMouseDown = function(_, mx, my)
-        local i = math.floor((my - top) / ROW) + 1
-        if i >= 1 and i <= #list then
-            c.presetSel = list[i]
-            c.presetName = list[i]
-            e:setText(list[i])
-            c.delArm = nil
-            c:updateButtons()
-        end
-        return true
+-- changes whenever the selector's list would
+function P.key(id) return table.concat(names(id), "\1") end
+
+-- why name is not usable for the preset sel (nil when fine). A new preset left empty is not an error: its buttons stay off.
+function P.nameError(sel, name)
+    if sel == P.DEFAULT then return nil end
+    local n = trim(name)
+    if n == "" then return sel ~= "" and "needs a name of 1 to 40 characters" or nil end
+    if #n > 40 then return "at most 40 characters" end
+    if n:lower() == P.DEFAULT:lower() then return "Default is reserved" end
+    local cfg = SEM.Net.snapshot and SEM.Net.snapshot.config
+    for k in pairs(cfg and cfg.presets or {}) do
+        if k ~= sel and tostring(k):lower() == n:lower() then return "another preset has this name" end
     end
-    local base = form.draw
-    form.draw = function(self)
-        base(self)
-        local col = T.c
-        if #list == 0 then T.text(view, SEM.t("nopresets", "No presets for this event yet."), 12, top, col.dim) end
-        for i, n in ipairs(list) do
-            local yy = top + (i - 1) * ROW
-            if n == c.presetSel then T.rect(view, 8, yy, view:getWidth() - 34, ROW - 2, col.line, 0.4) end
-            T.text(view, T.fit(n, view:getWidth() - 60), 14, yy + 3, n == c.presetSel and col.hot or col.amber)
-        end
-        local m = c.serverErrs and c.serverErrs.name
-        if m then T.text(view, m, 12, top - 18, col.red) end
+    return nil
+end
+
+local HELP = "Default is this event's own settings. Pick a preset to edit it, or New preset to start from Default. Update keeps your changes (and a new name); Save As keeps them under the name typed."
+
+local NAME_HELP = "The preset's name, 1 to 40 characters. Changing it and pressing Update renames the preset."
+
+-- c is the console; adds the selector and the name row at y, returns the next y
+function P.build(c, form, d, y)
+    local sel = c.psel[c.sel] or P.DEFAULT
+    local values, labels = { P.DEFAULT }, { P.DEFAULT }
+    for _, n in ipairs(names(c.sel)) do values[#values + 1], labels[#labels + 1] = n, n end
+    values[#values + 1], labels[#labels + 1] = "", "New preset"
+    local step = T.bh() + 8
+    local cx, w = form.cx, form:cw(260)
+    form:label("Preset", y, "preset", nil, nil, HELP)
+    form:tip(form:combo("preset", cx, y, w, values, sel, function(v) c:pickPreset(v) end, labels), HELP)
+    y = y + step
+    form:label("Name", y, "name", cx + w + 8, y, NAME_HELP)
+    if sel == P.DEFAULT then
+        table.insert(form.marks, { P.DEFAULT .. " (cannot be renamed)", cx + 4, y + 3, T.c.dim })
+    else
+        -- Form:entry polls the text each frame (onTextChange fires before the box updates); Console:build puts focus back
+        c.nameBox = form:tip(form:entry("name", cx, y, w, d.name or "", function(t) d.name = t; c:changed(false) end), NAME_HELP)
     end
-    return top + math.max(1, #list) * ROW + 8
+    return y + step + 6
 end
 
 return P

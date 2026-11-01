@@ -311,14 +311,13 @@ end)
 require "SEM/Conditions"
 require "SEM/EventDefs"
 local Cn, ED = SEM.Conditions, SEM.EventDefs
-local function ctx(o) local c = { onlinePlayers = 5, activeRuns = 0, maxConcurrent = 2, nowMs = 1000000, lastFiredMs = nil } for k, v in pairs(o or {}) do c[k] = v end return c end
+local function ctx(o) local c = { onlinePlayers = 5, nowMs = 1000000, lastFiredMs = nil } for k, v in pairs(o or {}) do c[k] = v end return c end
 t("conditions", function()
     local c = { minPlayers = 2, cooldownMinutes = 30 }
     check("pass", Cn.check(c, ctx()), true)
     local ok, r = Cn.check(c, ctx({ onlinePlayers = 1 }))
     check("players", r, "1/2 players")
-    ok, r = Cn.check(c, ctx({ activeRuns = 2 }))
-    check("concurrent", r, "2/2 events running")
+    check("a full slot is not a condition", Cn.check(c, ctx({ activeRuns = 2, maxConcurrent = 2 })), true)
     ok, r = Cn.check(c, ctx({ lastFiredMs = 1000000 - 18 * 60000 }))
     check("cooldown", r, "cooldown 12 min")
     check("cooldown over", Cn.check(c, ctx({ lastFiredMs = 1000000 - 31 * 60000 })), true)
@@ -529,7 +528,7 @@ end)
 
 t("malformed payloads", function()
     local before2 = flat(Store.snapshot())
-    for _, c in ipairs({ "saveEvent", "savePreset", "deletePreset", "saveLimits", "forceEvent", "cancelRun" }) do
+    for _, c in ipairs({ "saveEvent", "savePreset", "renamePreset", "deletePreset", "saveLimits", "forceEvent", "cancelRun" }) do
         for _, p in ipairs({ "x", 5, true }) do
             send(adminA, c, p)
             check(c .. " error", sent[1].cmd, "error")
@@ -587,6 +586,27 @@ t("handler never throws", function()
     handlers[1]("ServerEventManager", "saveEvent", adminA, good)
     sendServerCommand = old
     handlers[1]("ServerEventManager", "saveEvent", { getAccessLevel = function() error("x") end }, good)
+end)
+
+t("migrate: old configs lose the convoy none guard, new ones are left alone", function()
+    local function cfg(schema)
+        return { schema = schema, events = { convoy = { options = { guardType = "none" } }, camp = { options = { guardType = "none" } } },
+            presets = { C = { eventId = "convoy", options = { guardType = "none" } }, A = { eventId = "airdrop", options = { guardType = "none" } } } }
+    end
+    local old = cfg(nil)
+    Store.migrate(old)
+    check("event option", old.events.convoy.options.guardType, "zombies")
+    check("convoy preset", old.presets.C.options.guardType, "zombies")
+    check("other event kept", old.events.camp.options.guardType .. old.presets.A.options.guardType, "nonenone")
+    local cur = cfg(2)
+    Store.migrate(cur)
+    check("schema 2 untouched", cur.events.convoy.options.guardType, "none")
+    Store.migrate({}) -- an empty or partial config does not crash
+    md["ServerEventManager.Config"] = cfg(nil)
+    md["ServerEventManager.World"] = { nextRunId = 3 }
+    for _, f in ipairs(initCbs) do f() end
+    check("stamped", Store.config.schema, SEM.Config.SCHEMA)
+    check("old world gets a queue", #Store.world.queue, 0)
 end)
 
 t("load fills defaults, drops unknown", function()
@@ -825,9 +845,17 @@ t("guard split and fallback", function()
     check("fallback warned", warned ~= nil and warned:find("A-Life is not loaded", 1, true) ~= nil, true)
     SEM.Compat_ALife = { spawnGuards = function() return 6 end }
     local m, k
-    Sp.siteGuards({ id = 1 }, { guardType = "npc", npcCount = 6, npcTier = "tier2", guardRadius = 10 }, { sq }, function(a, b) m, k = a, b end)
+    local grun, hooked = { id = 1, data = {} }, 0
+    local realHook = SEM.Events.camp.hookALife
+    SEM.Events.camp.hookALife = function() hooked = hooked + 1 end
+    Sp.siteGuards(grun, { guardType = "npc", npcCount = 6, npcTier = "tier2", guardRadius = 10 }, { sq }, function(a, b) m, k = a, b end)
+    SEM.Events.camp.hookALife = realHook
     check("npc count", m, 6)
     check("npc kind", k, "Level 2 NPC")
+    check("npc guards are counted for the group", grun.data.want .. "," .. #grun.data.uids .. "," .. type(grun.data.dead), "6,0,table")
+    check("npc guards claim near the site", grun.data.claimX .. "," .. grun.data.claimY, "10,10")
+    check("npc guards open the claim window", grun.data.claimUntil, SEM.Runner.clock() + SEM.Config.CAMP_CLAIM)
+    check("camp hook called", hooked, 1)
     -- Cancel drops pending batches
     asked, n = 0, nil
     SEM.Compat_ALife = { spawnGuards = function() return 0, "x" end }
@@ -857,6 +885,7 @@ local function freshWorld()
     Store.config.events.airdrop.options.durationMinutes = 30
     for k in pairs(Store.world.runs) do Store.world.runs[k] = nil end
     for i = #Store.world.history, 1, -1 do Store.world.history[i] = nil end
+    for i = #Store.world.queue, 1, -1 do Store.world.queue[i] = nil end
     calls = { start = 0, stop = 0, why = nil }
 end
 local realResolve = SEM.Targets.resolve
@@ -884,14 +913,22 @@ end)
 t("runner limit reached", function()
     freshWorld()
     Store.config.limits.maxConcurrent = 1
-    check("first", R.begin("airdrop", "force") ~= nil, true)
-    local run, why = R.begin("airdrop", "force")
+    check("first", R.begin("airdrop", "schedule") ~= nil, true)
+    local run, why = R.begin("airdrop", "schedule")
     check("refused", run, nil)
     check("reason", why:find("limit reached", 1, true) ~= nil, true)
     check("history failed", lastHist().state, "failed")
     check("history reason", lastHist().reason, why)
     check("still one", liveCount(), 1)
     check("no extra start", calls.start, 1)
+    -- D41: a forced run starts anyway, is marked, and is not counted
+    local f = R.begin("airdrop", "force")
+    check("forced starts", f ~= nil and f.forced, true)
+    check("forced not counted", R.liveCount(), 1)
+    check("forced still live", liveCount(), 2)
+    local g = R.begin("airdrop", "schedule", nil, nil, true)
+    check("forced flag on a schedule run", g ~= nil and g.forced, true)
+    check("scheduled still refused", R.begin("airdrop", "schedule"), nil)
 end)
 
 t("runner target failure", function()
@@ -1089,7 +1126,7 @@ t("marker follows the crate", function()
     local cx, cy = f.marker.x + 20, f.marker.y
     sent = {}
     R.crateLanded(f, cx, cy)
-    check("inside stays", #sent, 0)
+    check("inside stays", #sent, 2) -- only the admins' dot moves
     cx = f.marker.x + 200
     R.crateLanded(f, cx, f.marker.y)
     local dx = f.marker.x - cx
@@ -1192,7 +1229,7 @@ t("scheduler skips are logged for admins only", function()
     check("still one skip", #hist("skipped"), 1)
 end)
 
-t("scheduler conditions: cooldown and concurrency", function()
+t("scheduler conditions: cooldown; a full slot is no condition", function()
     freshWorld(); clearSchedules()
     local id, e = save({ conditions = { minPlayers = 1, cooldownMinutes = 60 } })
     Store.world.lastFired[id] = now * 1000 - 10 * 60000
@@ -1201,8 +1238,116 @@ t("scheduler conditions: cooldown and concurrency", function()
     check("cooldown over", (Sc.check(e)), true)
     Store.config.limits.maxConcurrent = 1
     R.begin("airdrop", "force")
-    check("slot taken", select(2, Sc.check(e)), "1/1 events running")
+    check("slot taken still passes", (Sc.check(e)), true)
     freshWorld()
+end)
+
+t("a full slot queues a scheduled start (D41)", function()
+    freshWorld(); clearSchedules()
+    local id, e = save({ enabled = false })
+    Store.config.limits.maxConcurrent = 1
+    local a = R.begin("airdrop", "schedule")
+    local r = Sc.fire(e)
+    check("queued", r, "queued")
+    check("one waiting", #Store.world.queue, 1)
+    local q = Store.world.queue[1]
+    check("entry", q.eventId .. q.scheduleId .. q.title .. q.at, "airdrop" .. id .. "Airdrop" .. now)
+    check("id from nextRunId", q.id, Store.world.nextRunId - 1)
+    check("no run, no skip", liveCount() .. #hist("skipped"), "10")
+    check("cooldown not started", Store.world.lastFired[id], nil)
+    check("snapshot carries it", Store.snapshot().queue[1].id, q.id)
+    local f = R.feed()
+    check("feed lists it pending", f[#f].state .. f[#f].title, "pendingAirdrop")
+    local n, why = Sc.fire(e)
+    check("second for the schedule refused", n, nil)
+    check("reason", why, "already waiting in the queue")
+    check("logged", hist("skipped")[1].reason, why)
+    check("still one", #Store.world.queue, 1)
+    check("forced does not queue", type(Sc.fire(e, true)), "table")
+    check("forced not counted", R.liveCount(), 1)
+    -- full queue
+    freshWorld(); clearSchedules()
+    Store.config.limits.maxConcurrent = 1
+    R.begin("airdrop", "schedule")
+    for i = 1, SEM.Config.QUEUE_MAX + 1 do
+        local _, en = save({ name = "S" .. i, enabled = false })
+        local res, w = Sc.fire(en)
+        if i <= SEM.Config.QUEUE_MAX then check("fits " .. i, res, "queued") else check("full", tostring(res) .. tostring(w), "nilqueue full: 10 events waiting") end
+    end
+    check("logged the refusal", hist("skipped")[1].reason, "queue full: 10 events waiting")
+    freshWorld(); clearSchedules()
+end)
+
+t("queued start counts as fired for the window and last", function()
+    freshWorld(); clearSchedules()
+    local id, e = save()
+    Store.config.limits.maxConcurrent = 1
+    R.begin("airdrop", "schedule")
+    tickAt(20, 0)
+    check("queued", #Store.world.queue, 1)
+    check("last text", e.last, "queued Fri 20:00")
+    check("window spent", Store.world.windows["" .. id .. ":2026-10-30:20:00"].state, "fired")
+    tickAt(20, 1)
+    check("not queued twice", #Store.world.queue, 1)
+    check("no skip logged", #hist("skipped"), 0)
+    freshWorld(); clearSchedules()
+end)
+
+t("queue promotion: free slot, gap, recheck, restart, cancel", function()
+    freshWorld(); clearSchedules()
+    local id, e = save({ conditions = { minPlayers = 1, cooldownMinutes = 0 } })
+    local _, e2 = save({ name = "Second" })
+    local _, e3 = save({ name = "Third" })
+    Store.config.limits.maxConcurrent = 1
+    local a = R.begin("airdrop", "schedule")
+    Sc.fire(e); Sc.fire(e2); Sc.fire(e3)
+    check("three waiting", #Store.world.queue, 3)
+    sent = {}
+    R.pollNow()
+    check("slot full: nothing starts", #Store.world.queue, 3)
+    R.cancel(a.id)
+    sent = {}
+    R.pollNow()
+    check("head started", #Store.world.queue, 2)
+    check("it is the first", R.feed()[1].title .. Store.world.lastFired[id], "Airdrop" .. now * 1000)
+    local fed
+    for _, m in ipairs(sent) do if m.cmd == "eventFeed" and m.to == plain then fed = m end end
+    check("players told", fed ~= nil, true)
+    local run
+    for _, r in pairs(Store.world.runs) do run = r end
+    R.cancel(run.id)
+    now = now + SEM.Config.EVENT_GAP - 1
+    R.pollNow()
+    check("gap holds the next", #Store.world.queue, 2)
+    now = now + 1
+    -- a schedule switched off while waiting is dropped with the reason
+    e2.enabled = false
+    Store.world.lastFired[e3.id] = now * 1000
+    e3.conditions.cooldownMinutes = 30
+    R.pollNow()
+    check("both dropped, none started", #Store.world.queue, 0)
+    check("drop logged", hist("skipped", "Second")[1].reason, "schedule is no longer enabled")
+    check("cooldown reason", hist("skipped", "Third")[1].reason, "cooldown 30 min")
+    check("nothing started", liveCount(), 0)
+    -- survives a restart, deleted schedule is dropped, queued id can be cancelled
+    freshWorld(); clearSchedules()
+    local _, e4 = save({ name = "Fourth", enabled = true })
+    Store.config.limits.maxConcurrent = 1
+    local b = R.begin("airdrop", "schedule")
+    Sc.fire(e4)
+    Store.init()
+    check("kept over a restart", #Store.world.queue, 1)
+    local qid = Store.world.queue[1].id
+    check("cancel by id", R.cancel(tostring(qid)), true)
+    check("gone", #Store.world.queue, 0)
+    check("unknown id", R.cancel(qid), nil)
+    Sc.fire(Store.config.schedules[e4.id])
+    Store.deleteSchedule(e4.id)
+    R.cancel(b.id)
+    now = now + SEM.Config.EVENT_GAP
+    R.pollNow()
+    check("deleted schedule dropped", #Store.world.queue .. liveCount(), "00")
+    freshWorld(); clearSchedules()
 end)
 
 t("scheduler preset override and bad presets", function()
@@ -1259,10 +1404,11 @@ t("runSchedule ignores timing, enabled and cooldown", function()
     send(adminA, "runSchedule", { id = id })
     check("started anyway", liveCount(), 1)
     check("snapshot sent", sent[#sent].cmd, "snapshot")
-    -- limit still applies
+    -- the limit does not apply
     Store.config.limits.maxConcurrent = 1
     send(adminA, "runSchedule", { id = id })
-    check("limit refuses", sent[#sent].args.bad, true)
+    check("run now ignores the limit", liveCount(), 2)
+    check("run now not queued", #Store.world.queue, 0)
     freshWorld()
 end)
 
@@ -1881,10 +2027,73 @@ t("convoy vehicles and damage", function()
     check("convoy asks for roads", Cv.preferClass, "road")
 end)
 
+t("convoy guards: icons, end on guards, crates stay", function()
+    local Cv, Sp, Ca = SEM.Events.convoy, SEM.Spawn, SEM.Events.camp
+    local log = {}
+    local undo = stubRunner(log)
+    local opt = {}
+    for _, f in ipairs(SEM.EventDefs.byId.convoy.options) do if f.key == "guardType" then opt = f end end
+    local none = false
+    for _, c in ipairs(opt.choices) do if c == "none" then none = true end end
+    check("convoy has no none guards", none, false)
+    check("convoy default is zombies", opt.default, "zombies")
+    check("convoy random still zombies or npc", opt.randomFrom[2], "npc")
+    local air = false
+    for _, f in ipairs(SEM.EventDefs.byId.airdrop.options) do if f.key == "guardType" then air = f.choices[2] == "none" end end
+    check("airdrop keeps none", air, true)
+    -- any active run with a group is listed, so its NPCs join and get their icons
+    freshWorld()
+    local cr = { id = 970, eventId = "convoy", state = "active", x = 10, y = 10, data = { want = 2, uids = {}, dead = {}, claimUntil = SEM.Runner.clock() + 60 } }
+    Store.world.runs["970"] = cr
+    local onSpawned
+    local realAL, realTag = SEM.Compat_ALife, Sp.tagNpc
+    SEM.Compat_ALife = { hookEvents = function(a) onSpawned = a end }
+    Ca.hookALife()
+    local tagged
+    Sp.tagNpc = function(_, uid, kind) tagged = uid .. kind end
+    onSpawned({ getX = function() return 11 end, getY = function() return 10 end }, "u1")
+    SEM.Compat_ALife, Sp.tagNpc = realAL, realTag
+    check("convoy guard joins", #cr.data.uids, 1)
+    check("convoy guard is hostile", tagged, "u1HostileNpc")
+    -- NPC guards
+    local realEmpty, realRemove, realHook = Sp.cratesEmpty, Sp.removeCrates, Ca.hookALife
+    Sp.cratesEmpty = function() return true end
+    Ca.hookALife = function() end
+    local run = { id = 971, placed = true, options = {}, data = { want = 2, uids = { "a", "b" }, dead = { a = true }, claimUntil = 0, crates = { {} } } }
+    check("crates empty does not end it", Cv.update(run), false)
+    check("status shows guards left", run.status:find("1 of 2 guards left", 1, true) ~= nil, true)
+    run.data.dead.b = true
+    check("npc guards dead ends it", Cv.update(run), "all guards dead")
+    check("npc remaining", #Cv.remaining(run), 0)
+    -- zombie guards
+    local z = { dead = false, getOnlineID = function() return 5 end, isDead = function(self) return self.dead end }
+    Cv.state[972] = { refs = { { id = 5, z = z } }, tracked = 1, total = 1 }
+    run = { id = 972, placed = true, options = {}, data = { crates = {} } }
+    check("zombie guard alive", Cv.update(run), false)
+    z.dead = true
+    check("zombie guards dead ends it", Cv.update(run), "all guards dead")
+    Cv.state[972] = { refs = {}, tracked = 0, total = 0 }
+    check("no guards spawned ends at once", Cv.update(run), "no guards spawned")
+    Cv.state[972] = nil
+    check("restart releases it", Cv.update(run), "released by a restart; the guards stay in the world")
+    -- crates: kept on a normal end, the old rule on cancel
+    local asked
+    Sp.removeCrates = function(_, why, empty) asked = why .. tostring(empty) return nil end
+    run = { id = 973, options = {}, data = { crates = { {} }, vehicles = 1 } }
+    Cv.stop(run, "end")
+    check("end keeps crates", asked, nil)
+    check("end forgets crates", run.data.crates, nil)
+    run.data.crates = { {} }
+    Cv.stop(run, "cancel")
+    check("cancel removes unless a player is near", asked, "cancelfalse")
+    Sp.cratesEmpty, Sp.removeCrates, Ca.hookALife = realEmpty, realRemove, realHook
+    undo()
+end)
+
 t("crate helpers", function()
     local Sp = SEM.Spawn
-    check("pack loot", Sp.lootFor({ lootPack = "Low" }), Store.config.lootPacks[1].items)
-    check("gone pack is the built-in list", Sp.lootFor({ lootPack = "x" }), SEM.Config.LOOT_TIERS.medium)
+    check("pack loot", Sp.lootFor({ lootPack = { "Low" } }), Store.config.lootPacks[1].items)
+    check("gone pack is the built-in list", Sp.lootFor({ lootPack = { "x" } }), SEM.Config.LOOT_TIERS.medium)
     local own = { { item = "Base.Axe", chance = 5, min = 1, max = 1 } }
     local used = {}
     local sq = { getX = function() return 10 end, getY = function() return 20 end }
@@ -1932,6 +2141,8 @@ t("super zombies", function()
     local realG, realF, realD, realO = Sp.guards, Sp.findSquare, Sp.defer, Sp.outfitOk
     local outfits = {}
     Sp.findSquare = function() return { getX = function() return 1 end, getY = function() return 2 end } end
+    local realClear = Sp.clearSite
+    Sp.clearSite = function() end
     Sp.defer = function(_, _, _, fn) fn() end
     Sp.outfitOk = function(n) return n ~= "Nope" end
     Sp.guards = function(_, _, count, _, _, outfit, refs, done, per)
@@ -2001,6 +2212,7 @@ t("super zombies", function()
     Su.stop(run)
     Store.config.limits.maxZombiesPerEvent = 200
     Sp.guards, Sp.findSquare, Sp.defer, Sp.outfitOk = realG, realF, realD, realO
+    Sp.clearSite = realClear
     undo()
 end)
 
@@ -2213,7 +2425,7 @@ t("compat camp: a refused camp scene retries the whole group as guards", functio
     ProjectALife = keep
 end)
 
-t("D27: no flyover without a lead time; the landing alert ends it", function()
+t("D27 (now #26): the warning alert never carries a flyover", function()
     freshWorld()
     online = { adminA, adminB, plain }
     local o = Store.config.events.airdrop.options
@@ -2228,12 +2440,12 @@ t("D27: no flyover without a lead time; the landing alert ends it", function()
     o.soundOn, o.flyoverSound, o.leadMinutes = true, true, 2
     sent = {}
     local r = R.begin("airdrop", "force")
-    check("lead 2: flyover", sent[1].args.flyover, true)
+    check("lead 2: no flyover in the warning", sent[1].args.flyover, nil)
     freshWorld()
     o.soundOn, o.leadMinutes = false, 2
     sent = {}
     R.begin("airdrop", "force")
-    check("sound off: none", sent[1].args.flyover, false)
+    check("sound off: none", sent[1].args.flyover, nil)
     o.soundOn = true
     freshWorld()
     o.leadMinutes = 2
@@ -2288,35 +2500,25 @@ t("a run nobody reached ends as failed", function()
     freshWorld()
 end)
 
-t("Force with Override limits skips maxConcurrent only", function()
+t("Force Now always starts and is not counted (D41)", function()
     local function noticeOf() for _, m in ipairs(sent) do if m.cmd == "notice" then return m.args end end return {} end
     freshWorld()
     online = { adminA, adminB, plain }
     Store.config.limits.maxConcurrent = 1
     check("first", R.begin("airdrop", "force") ~= nil, true)
-    local refused, why = R.begin("airdrop", "force")
-    check("normal force refused", refused, nil)
-    check("normal reason", why:find("^limit reached") ~= nil, true)
     send(adminA, "forceEvent", { id = "airdrop" })
-    check("command without override refused", noticeOf().bad, true)
+    check("forced past the limit", noticeOf().bad, nil)
+    for _ = 1, 4 do send(adminA, "forceEvent", { id = "airdrop" }) end
+    check("six running", liveCount(), 6)
+    check("none counted", R.liveCount(), 0)
     send(adminA, "forceEvent", { id = "airdrop", override = true })
-    check("override: no refusal notice", noticeOf().bad, nil)
-    check("two running", liveCount(), 2)
-    send(adminA, "forceEvent", { id = "airdrop", override = false })
-    check("override false is a normal force", noticeOf().bad, true)
-    send(adminA, "forceEvent", { id = "airdrop", override = "yes" })
-    check("override must be boolean", sent[1].cmd .. tostring(sent[1].args.errors.override ~= nil), "errortrue")
-    check("still two", liveCount(), 2)
-    -- the option bound still holds: never past the form's maximum of 5
-    for _ = 1, 3 do send(adminA, "forceEvent", { id = "airdrop", override = true }) end
-    check("five running", liveCount(), 5)
-    send(adminA, "forceEvent", { id = "airdrop", override = true })
-    check("sixth refused", noticeOf().bad, true)
-    check("hard limit text", noticeOf().text:find("hard limit reached: 5 of 5", 1, true) ~= nil, true)
+    check("an old override flag is ignored", liveCount(), 7)
     check("limit untouched", Store.config.limits.maxConcurrent, 1)
-    send(plain, "forceEvent", { id = "airdrop", override = true })
+    check("a scheduled one starts, forced runs not counted", R.begin("airdrop", "schedule") ~= nil, true)
+    check("now the limit is full", R.begin("airdrop", "schedule"), nil)
+    send(plain, "forceEvent", { id = "airdrop" })
     check("non-admin silent", #sent, 0)
-    check("non-admin starts nothing", liveCount(), 5)
+    check("non-admin starts nothing", liveCount(), 8)
     freshWorld()
 end)
 
@@ -2379,8 +2581,10 @@ t("base and safehouse targets move just outside the protected zone", function()
     local realSH = SafeHouse
     SafeHouse = { getSafehouseList = function() return { size = function() return 1 end, get = function() return {
         getX = function() return 1000 end, getY = function() return 2000 end, getW = function() return 10 end, getH = function() return 10 end,
-        getTitle = function() return "H" end } end } end }
+        getTitle = function() return "H" end, getOwner = function() return "h" end, getOwner = function() return "h" end } end } end }
     SEM.Safety.refresh()
+    local realOnline = SEM.Targets.online
+    SEM.Targets.online = function() return { names = { h = true }, factions = {} } end
     local p = realResolve({ locationMode = "randomSafehouse" })
     check("centre was protected", SEM.Safety.isProtected(1005, 2005), true)
     check("target is not", SEM.Safety.isProtected(p.x, p.y), false)
@@ -2388,7 +2592,7 @@ t("base and safehouse targets move just outside the protected zone", function()
     check("and close enough for findSquare's 15", math.abs(p.x - 1005) <= reach and math.abs(p.y - 2005) <= reach, true)
     p = realResolve({ locationMode = "randomSafehouse", respectProtected = false })
     check("event that ignores protection keeps the centre", p.x .. "," .. p.y, "1005,2005")
-    SafeHouse = realSH
+    SafeHouse, SEM.Targets.online = realSH, realOnline
     SEM.Safety.refresh()
 end)
 
@@ -2471,7 +2675,7 @@ t("reqId is echoed to the sender in the snapshot and in errors", function()
     send(adminA, "saveSchedule", { name = "", eventId = "airdrop", enabled = false, schedule = { mode = "off" }, conditions = {}, reqId = "bad" })
     check("saveSchedule error acked", sent[1].args.ack, "bad")
     send(adminA, "savePreset", { id = "airdrop", name = "AckPre", options = {}, reqId = "p" })
-    check("savePreset is not acked", snapshotsTo(adminA)[1].args.ack, nil)
+    check("savePreset acked", snapshotsTo(adminA)[1].args.ack, "p")
     send(adminA, "deletePreset", { name = "AckPre" })
     send(adminA, "getSnapshot", { reqId = "x" })
     check("getSnapshot carries no ack", snapshotsTo(adminA)[1].args.ack, nil)
@@ -2577,6 +2781,8 @@ t("a restart mid-batch spawns no second group", function()
     local Su, Ca, Sp = SEM.Events.super, SEM.Events.camp, SEM.Spawn
     local log = {}
     local undo = stubRunner(log)
+    local realClear = Sp.clearSite
+    Sp.clearSite = function() end
     local realG, realF, realD, realO = Sp.guards, Sp.findSquare, Sp.defer, Sp.outfitOk
     local batches, placingSeen = 0, nil
     Sp.findSquare = function() return { getX = function() return 1 end, getY = function() return 2 end, getZ = function() return 0 end } end
@@ -2613,6 +2819,7 @@ t("a restart mid-batch spawns no second group", function()
     check("camp: empty references do not clear it", Ca.update({ id = 982, placed = true, options = {}, data = { zombies = 6 } }), false)
     Ca.state[982] = nil
     Sp.cratesEmpty = realEmpty
+    Sp.clearSite = realClear
     Sp.guards, Sp.findSquare, Sp.defer, Sp.outfitOk = realG, realF, realD, realO
     undo()
 end)
@@ -2701,9 +2908,9 @@ t("loot packs validate, draw rows at random and resolve", function()
     local Sp2 = SEM.Spawn
     local tiered = { { name = "L", tier = "low", picks = 0, items = { { item = "Base.Nails", chance = 1, min = 1, max = 1 } } },
         { name = "H", tier = "high", picks = 0, items = { { item = "Base.Axe", chance = 1, min = 1, max = 1 } } } }
-    check("random high tier", Sp2.packRows("random:high", tiered, function() return 0 end)[1].item, "Base.Axe")
-    check("random low tier", Sp2.packRows("random:low", tiered, function() return 0 end)[1].item, "Base.Nails")
-    check("no pack of that tier", Sp2.packRows("random:medium", tiered, function() return 0 end), nil)
+    check("random high tier", Sp2.packRows({ "random:high" }, tiered, function() return 0 end)[1].item, "Base.Axe")
+    check("random low tier", Sp2.packRows({ "random:low" }, tiered, function() return 0 end)[1].item, "Base.Nails")
+    check("no pack of that tier", Sp2.packRows({ "random:medium" }, tiered, function() return 0 end), nil)
     check("label", SEM.Fmt.packLabel("random:high"), "Random High Tier")
     check("bad tier refused", (Store.validatePacks({ { name = "A", tier = "epic" } }, true)), false)
     local ok, packs = Store.validatePacks({ { name = "A", items = { { item = "Base.Axe", chance = 10, min = 1, max = 2 }, { item = "Base.Nails", chance = 10, min = 1, max = 1 } }, picks = 1 }, { name = "E" } }, true)
@@ -2713,39 +2920,101 @@ t("loot packs validate, draw rows at random and resolve", function()
     check("reserved", (Store.validatePacks({ { name = "random" } }, true)), false)
     local Sp = SEM.Spawn
     local first = function() return 0 end
-    local rows = Sp.packRows("A", packs, first)
+    local rows = Sp.packRows({ "A" }, packs, first)
     check("one row drawn", #rows, 1)
     check("drawn row is certain", rows[1].chance, 100)
     check("keeps its counts", rows[1].max, 2)
     check("pack untouched", #packs[1].items, 2)
-    check("no picks: all rows", #Sp.packRows("A", { { name = "A", picks = 0, items = packs[1].items } }, first), 2)
-    check("random skips empty", #Sp.packRows("random", packs, first), 1)
-    check("gone", Sp.packRows("Z", packs, first), nil)
-    check("random with nothing", Sp.packRows("random", {}, first), nil)
+    check("no picks: all rows", #Sp.packRows({ "A" }, { { name = "A", picks = 0, items = packs[1].items } }, first), 2)
+    check("random skips empty", #Sp.packRows({ "random" }, packs, first), 1)
+    check("gone", Sp.packRows({ "Z" }, packs, first), nil)
+    check("random with nothing", Sp.packRows({ "random" }, {}, first), nil)
 end)
 
-t("generate random schedules: one Random Game Time entry per preset, only earlier generated ones replaced", function()
+t("generate random schedules: adds count entries, cycles presets, never touches existing ones", function()
     freshWorld()
     local Sc = SEM.Scheduler
     local t1 = Sc.randomTiming(function(n) return n end)
     check("mode", t1.mode, "randomGame")
     check("max above min", t1.maxDays >= t1.minDays, true)
     Store.config.schedules, Store.config.presets = {}, {}
-    check("no presets", select(2, Sc.generate()), "Save a preset on an event page first")
+    check("no presets", select(2, Sc.generate(3)), "Save a preset on an event page first")
     Store.config.presets.P1 = { eventId = "airdrop", options = Store.config.events.airdrop.options }
     Store.config.presets.P2 = { eventId = "camp", options = Store.config.events.camp.options }
-    local keep = Store.validateEntry and Store.saveSchedule(nil, select(2, Store.validateEntry({ name = "Mine", eventId = "airdrop", preset = "", enabled = true,
+    local keep = Store.saveSchedule(nil, select(2, Store.validateEntry({ name = "Mine", eventId = "airdrop", preset = "", enabled = false,
         schedule = { mode = "scheduledGame", windows = {} }, conditions = SEM.Conditions.defaults() })))
-    check("made two", Sc.generate(), 2)
-    check("again replaces them", Sc.generate(), 2)
-    check("three entries", Store.scheduleCount(), 3)
-    check("admin entry stays", Store.config.schedules[keep].name, "Mine")
+    check("made two", Sc.generate(2), 2)
+    local seen = {}
+    for _, e in pairs(Store.config.schedules) do if e.preset ~= "" then seen[e.preset] = true end end
+    check("both presets before repeats", seen.P1 and seen.P2, true)
+    check("again adds", Sc.generate(3), 3)
+    check("six entries", Store.scheduleCount(), 6)
+    check("admin entry unchanged", Store.config.schedules[keep].enabled, false)
+    local names = {}
     for _, e in pairs(Store.config.schedules) do
+        check("unique " .. e.name, names[e.name], nil)
+        names[e.name] = true
+        check("name fits", #e.name <= 40, true)
         if e.name ~= "Mine" then
             check("random only " .. e.name, e.schedule.mode, "randomGame")
             check("armed", e.enabled, true)
         end
     end
+    check("suffix used", names["Auto: P1 2"] or names["Auto: P2 2"], true)
+    Store.config.schedules, Store.config.presets = {}, { [("L"):rep(40)] = { eventId = "airdrop", options = Store.config.events.airdrop.options } }
+    check("long name, three", Sc.generate(3), 3)
+    for _, e in pairs(Store.config.schedules) do check("long name fits " .. e.name, #e.name <= 40, true) end
+    Store.config.schedules, Store.config.presets = {}, { P1 = { eventId = "airdrop", options = Store.config.events.airdrop.options } }
+    for i = 1, 48 do Store.saveSchedule(nil, select(2, Store.validateEntry({ name = "M" .. i, eventId = "airdrop", preset = "", enabled = true,
+        schedule = { mode = "scheduledGame", windows = {} }, conditions = SEM.Conditions.defaults() }))) end
+    local made, why = Sc.generate(5)
+    check("stops at the limit", made, 2)
+    check("says why", why, "stopped at the 50 schedule limit")
+    check("full: none made", select(2, Sc.generate(1)), "At most 50 schedules")
+    Store.config.schedules, Store.config.presets = {}, {}
+end)
+
+t("generateSchedules and bulkSchedule commands validate the whole payload", function()
+    freshWorld()
+    local function text() for _, m in ipairs(sent) do if m.cmd == "notice" then return m.args.text end end end
+    Store.config.schedules, Store.config.presets = {}, { P1 = { eventId = "airdrop", options = Store.config.events.airdrop.options } }
+    for _, bad in ipairs({ 0, 51, 2.5, "3", -1 }) do
+        send(adminA, "generateSchedules", { count = bad })
+        check("bad count " .. tostring(bad), sent[1].cmd, "error")
+    end
+    send(adminA, "generateSchedules", {})
+    check("no count", sent[1].cmd, "error")
+    check("nothing made", Store.scheduleCount(), 0)
+    send(adminA, "generateSchedules", { count = 4 })
+    check("made four", Store.scheduleCount(), 4)
+    local ids = {}
+    for id in pairs(Store.config.schedules) do ids[#ids + 1] = id end
+    table.sort(ids)
+    local before3 = flat(Store.snapshot())
+    local bads = { { ids = ids, action = "nuke" }, { ids = ids }, { action = "delete" }, { ids = {}, action = "delete" }, { ids = "s1", action = "delete" },
+        { ids = { ids[1], "nope" }, action = "delete" }, { ids = { ids[1], 5 }, action = "delete" }, { ids = { ids[1], ids[1] }, action = "delete" } }
+    for i, a in ipairs(bads) do
+        send(adminA, "bulkSchedule", a)
+        check("rejected " .. i, sent[1].cmd, "error")
+    end
+    local many = {}
+    for i = 1, 51 do many[i] = ids[1] end
+    send(adminA, "bulkSchedule", { ids = many, action = "delete" })
+    check("over 50", sent[1].cmd, "error")
+    check("all or nothing", flat(Store.snapshot()), before3)
+    send(adminA, "bulkSchedule", { ids = { ids[1], ids[2] }, action = "disable" })
+    check("notice", text(), "2 schedule(s) disabled")
+    check("disabled", Store.config.schedules[ids[1]].enabled or Store.config.schedules[ids[2]].enabled, false)
+    check("others kept", Store.config.schedules[ids[3]].enabled, true)
+    send(adminA, "bulkSchedule", { ids = { ids[1] }, action = "enable" })
+    check("enabled", Store.config.schedules[ids[1]].enabled, true)
+    check("enable rolls next", Store.config.schedules[ids[1]].next ~= "", true)
+    send(adminA, "bulkSchedule", { ids = { ids[1], ids[2] }, action = "delete" })
+    check("delete notice", text(), "2 schedule(s) deleted")
+    check("two left", Store.scheduleCount(), 2)
+    send(plain, "bulkSchedule", { ids = { ids[3] }, action = "delete" })
+    check("non-admin silent", #sent, 0)
+    check("non-admin kept", Store.scheduleCount(), 2)
     Store.config.schedules, Store.config.presets = {}, {}
 end)
 
@@ -2768,7 +3037,7 @@ t("event bar lists live and recent runs, never a site, and only what was announc
     check("a skip was never announced", #R.feed(), 0)
     local keep = Store.config.limits.maxConcurrent
     Store.config.limits.maxConcurrent = 0
-    R.begin("airdrop", "force")
+    R.begin("airdrop", "schedule")
     check("a refused run was never announced", #R.feed(), 0)
     Store.config.limits.maxConcurrent, o.leadMinutes = keep, 0
     freshWorld()
@@ -2922,11 +3191,11 @@ t("vehicle packs validate and resolve", function()
     check("bad id", (Store.validatePacks({ { name = "A", vehicles = { "a b" } } })), false)
     local C2 = SEM.Events.convoy
     local first = function() return 0 end
-    check("default", select(2, C2.packIds("", packs, first)), "")
-    check("named", C2.packIds("Mil", packs, first)[1], "Mod.Tank")
-    check("random skips empty packs", select(2, C2.packIds("random", packs, first)), "Mil")
-    check("random with none", #C2.packIds("random", {}, first), 0)
-    check("gone", select(2, C2.packIds("Nope", packs, first)), nil)
+    check("default", select(2, C2.packIds({}, packs, first)), "")
+    check("named", C2.packIds({ "Mil" }, packs, first)[1], "Mod.Tank")
+    check("random skips empty packs", select(2, C2.packIds({ "random" }, packs, first)), "Mil")
+    check("random with none", #C2.packIds({ "random" }, {}, first), 0)
+    check("gone", select(2, C2.packIds({ "Nope" }, packs, first)), nil)
 end)
 
 t("wildfire guard scans only blocks touching a zone", function()
@@ -2967,6 +3236,725 @@ t("hunted has no time limit", function()
     check("no marker", opt("markerOn"), nil)
     local r = { state = "active", startedAt = 1, options = {} }
     check("detail tolerates no duration", #SEM.Fmt.runDetail(r, 2), 0)
+end)
+
+t("horde moves its spawn point off players standing on it", function()
+    local H, Sp, Ta = SEM.Events.horde, SEM.Spawn, SEM.Targets
+    local realCell, realAdd, realPlayers, realSuits, realTag = getCell, addZombiesInOutfit, Ta.players, Sp.suits, Sp.tag
+    local who = { getUsername = function() return "p" end, getX = function() return 100 end, getY = function() return 100 end }
+    Ta.players = function() return { who } end
+    getCell = function() return { getGridSquare = function(_, x, y) return { getX = function() return x end, getY = function() return y end } end } end
+    Sp.suits, Sp.tag = function() return true end, function() end
+    local at
+    addZombiesInOutfit = function(x, y)
+        at = { x = x, y = y }
+        return { size = function() return 1 end, get = function() return { getOnlineID = function() return 1 end } end }
+    end
+    local st = { refs = {}, left = 20, want = 20, spawned = 0, fails = 0, sx = 100, sy = 100, cx = 100, cy = 100, lastPulse = 1e12 }
+    H.state[9901] = st
+    H.step({ id = 9901, options = { spawnDistance = 60, pulseInterval = 1, pulseRadius = 1 }, data = {} })
+    H.state[9901] = nil
+    getCell, addZombiesInOutfit, Ta.players, Sp.suits, Sp.tag = realCell, realAdd, realPlayers, realSuits, realTag
+    check("spawned anyway", at ~= nil, true)
+    check("10 fewer to go", st.left, 10)
+    check("no failure counted", st.fails, 0)
+    check("30 or more from the player", (at.x - 100) ^ 2 + (at.y - 100) ^ 2 >= 29 * 29, true)
+end)
+
+t("a base counts as online through its owner or a member", function()
+    local B = SEM.Targets.baseOnline
+    local on = { names = { ann = true }, factions = { Crew = true } }
+    check("owner", B({ owner = "ann" }, on), true)
+    check("member", B({ owner = "bob", members = { "cy", "ann" } }, on), true)
+    check("nobody", B({ owner = "bob", members = { "cy" } }, on), false)
+    check("creator", B({ owner = "bob", createdBy = "ann" }, on), true)
+    check("faction base", B({ ownerKind = "faction", owner = "Crew" }, on), true)
+    check("other faction", B({ ownerKind = "faction", owner = "Others" }, on), false)
+    check("no owner known", B({}, on), true)
+end)
+
+t("offline bases are never picked", function()
+    local H, S2 = SEM.Events.horde, SEM.Events.siege
+    local list = { { id = "off", x = 1, y = 1, offline = true }, { id = "on", x = 2, y = 2 } }
+    local ctx = { safehouses = function() return list end, jeem = function() return list end, homes = function() return list end, players = function() return {} end }
+    for _, t2 in ipairs({ "randomSafehouse", "randomJeemBase", "aLifeHome" }) do
+        check(t2, H.pickTarget({ targetType = t2, targetBase = "" }, ctx, function() return 0 end).x, 2)
+    end
+    local r, why = H.pickTarget({ targetType = "chosenSafehouse", targetBase = "off" }, ctx, function() return 0 end)
+    check("chosen offline refused", r, nil)
+    check("says why", why:find("online", 1, true) ~= nil, true)
+    local only = { safehouses = function() return { list[1] } end }
+    r, why = H.pickTarget({ targetType = "randomSafehouse" }, only, function() return 0 end)
+    check("none online", r, nil)
+    local b = { { id = "a", kind = "safehouse", offline = true }, { id = "b", kind = "jeem" } }
+    check("siege random", #S2.candidates(b, "random", ""), 1)
+    check("siege chosen offline", #S2.candidates(b, "chosenBase", "a"), 0)
+end)
+
+t("clear site", function()
+    local Sp, R = SEM.Spawn, SEM.Runner
+    local realCell, realWarn, realLanded = getCell, R.warn, R.crateLanded
+    local forest, loadedAll, lookups = function() return false end, true, 0
+    getCell = function()
+        return { getGridSquare = function(_, x, y)
+            lookups = lookups + 1
+            if not loadedAll then return nil end
+            return { HasTree = function() return forest(x, y) end }
+        end }
+    end
+    local warns, landed = {}, {}
+    R.warn = function(_, text) warns[#warns + 1] = text end
+    R.crateLanded = function(_, x, y) landed[#landed + 1] = x .. "," .. y end
+    local o = { avoidForest = true, locationMode = "town" }
+    local function newRun() return { x = 100, y = 100, data = {} } end
+
+    local run = newRun()
+    Sp.clearSite(run, o)
+    check("clear site stays", run.x, 100)
+    check("clear site no warn", #warns + #landed, 0)
+
+    forest = function(x, y) return math.abs(x - 100) < 15 and math.abs(y - 100) < 15 end
+    run = newRun()
+    Sp.clearSite(run, o)
+    check("moved out of the trees", run.x ~= 100 or run.y ~= 100, true)
+    check("marker follows", landed[1], run.x .. "," .. run.y)
+    local moved = run.x
+    Sp.clearSite(run, o)
+    check("runs once", #landed, 1)
+    check("run once keeps x", run.x, moved)
+
+    forest = function() return true end
+    run = newRun()
+    lookups = 0
+    Sp.clearSite(run, o)
+    check("stuck in trees", run.x, 100)
+    check("warns", warns[1], "no clear ground found near the site, placing in the trees")
+    check("lookup bound", lookups <= 49 * 73, true)
+
+    run = newRun()
+    Sp.clearSite(run, { avoidForest = false, locationMode = "town" })
+    Sp.clearSite(run, { avoidForest = true, locationMode = "anywhere" })
+    check("avoidForest off does nothing", run.data.cleared, nil)
+
+    loadedAll = false
+    run = newRun()
+    Sp.clearSite(run, o)
+    check("unknown cover does nothing", run.x, 100)
+    check("unknown cover not marked", run.data.cleared, nil)
+    check("unknown cover nil", Sp.treeCover(100, 100), nil)
+    getCell, R.warn, R.crateLanded = realCell, realWarn, realLanded
+end)
+
+t("B3b: the bar feed carries time left and a status word", function()
+    freshWorld()
+    local function mk(id, ev, st, extra)
+        local r = { id = id, eventId = ev, state = st, title = "T" .. id, x = 1, y = 1, data = {}, elapsed = 600, lastSeen = now,
+            options = { durationMinutes = 30, title = "T" .. id } }
+        for k, v in pairs(extra or {}) do r[k] = v end
+        Store.world.runs[tostring(id)] = r
+        return r
+    end
+    mk(980, "airdrop", "active")
+    mk(981, "hunted", "active")
+    mk(982, "airdrop", "warning", { warnEnds = now + 250 })
+    mk(983, "siege", "active", { barTitle = "Siege 1/2", barText = "Incoming Wave", barAt = now + 30 })
+    local by = {}
+    for _, e in ipairs(R.feed()) do by[e.id] = e end
+    check("active left", by[980].left, 1200)
+    check("active status", by[980].status, "Active")
+    check("endless has no left", by[981].left, nil)
+    check("endless status", by[981].status, "Active")
+    check("warning left", by[982].left, 250)
+    check("warning status", by[982].status, "Incoming")
+    check("run text wins", by[983].status, "Incoming Wave")
+    check("run title wins", by[983].title, "Siege 1/2")
+    check("run countdown", by[983].left, 30)
+    check("left not below 0", (function() Store.world.runs["980"].elapsed = 5000 return R.feed()[1].left end)(), 0)
+    Store.world.queue[1] = { id = 984, title = "Q", eventId = "airdrop" }
+    local q
+    for _, e in ipairs(R.feed()) do if e.id == 984 then q = e end end
+    check("queued status", q.status, "Pending")
+    Store.world.queue[1] = nil
+    freshWorld()
+end)
+
+t("B3b: the feed is resent about every 60 seconds while a run is live", function()
+    freshWorld()
+    Store.world.runs["985"] = { id = 985, eventId = "airdrop", state = "active", title = "A", x = 1, y = 1, data = {}, elapsed = 0, lastSeen = now, options = { durationMinutes = 30 } }
+    R.pollNow()
+    now = now + 70
+    Store.world.runs["985"].lastSeen = now
+    sent = {}
+    R.pollNow()
+    local n = 0
+    for _, m in ipairs(sent) do if m.cmd == "eventFeed" and m.to == plain then n = n + 1 end end
+    check("resent", n, 1)
+    now = now + 10
+    sent = {}
+    R.pollNow()
+    n = 0
+    for _, m in ipairs(sent) do if m.cmd == "eventFeed" then n = n + 1 end end
+    check("not again at once", n, 0)
+    freshWorld()
+end)
+
+t("B3b: toNear reaches only players in range", function()
+    local function pl(x) return { getX = function() return x end, getY = function() return 0 end } end
+    local near, far = pl(50), pl(500)
+    local realPlayers = SEM.Targets.players
+    SEM.Targets.players = function() return { near, far } end
+    sent = {}
+    R.toNear(0, 0, 100, "alert", { id = 1 })
+    SEM.Targets.players = realPlayers
+    check("one send", #sent, 1)
+    check("to the near one", sent[1].to, near)
+    check("command", sent[1].cmd, "alert")
+end)
+
+t("B3b: waveWarnSeconds option", function()
+    local f
+    for _, o in ipairs(SEM.EventDefs.byId.siege.options) do if o.key == "waveWarnSeconds" then f = o end end
+    check("exists", f ~= nil, true)
+    check("default", f.default, 30)
+    check("range", f.min .. "-" .. f.max, "5-120")
+    check("group", f.group, "Attackers")
+    check("help", type(f.help) == "string" and #f.help > 10, true)
+end)
+
+t("D42: siege waves go incoming, attacking, regroup", function()
+    freshWorld()
+    local S2, Cp, AL, Sp = SEM.Events.siege, SEM.Events.camp, SEM.Compat_ALife, SEM.Spawn
+    local realAL, realNear, realNearest, realSq, realHook, realPlayers = AL, Sp.playerNear, Sp.nearestPlayer, S2.waveSquare, Cp.hookALife, SEM.Targets.players
+    local made, here = 2, true
+    SEM.Compat_ALife = { spawnRaid = function() return made end }
+    Sp.playerNear, Sp.nearestPlayer = function() return here end, function() return {} end
+    S2.waveSquare = function() return { getX = function() return 5 end, getY = function() return 6 end } end
+    Cp.hookALife = function() end
+    local told = {}
+    SEM.Targets.players = function() return {} end
+    local realToNear = R.toNear
+    R.toNear = function(x, y, range, cmd, args) told[#told + 1] = args.message end
+    local run = { id = 990, eventId = "siege", state = "active", title = "Under Siege", x = 1, y = 1, elapsed = 0, lastSeen = now,
+        options = { title = "Under Siege", durationMinutes = 60, waves = 2, attackers = 2, spawnDistance = 40, waveMinutes = 5, waveWarnSeconds = 30, npcTier = 1 }, data = { base = "B", wave = 0 } }
+    Store.world.runs["990"] = run
+    run.data.phase, run.data.at = "incoming", 30
+    check("not yet due", S2.due(run), false)
+    run.elapsed = 30
+    check("due", S2.due(run), true)
+    here = false
+    S2.update(run)
+    check("nobody near: held", run.data.phase .. run.data.wave, "incoming0")
+    check("shows waiting", run.barText, "Incoming Wave")
+    here = true
+    S2.update(run)
+    check("attacking", run.data.phase .. run.data.wave, "attacking1")
+    check("bar shows attacking", run.barText, "Attacking")
+    check("bar title", run.barTitle, "Under Siege 1/2")
+    S2.update(run)
+    check("alive: stays", run.data.phase, "attacking")
+    run.data.uids, run.data.dead = { "a", "b" }, { a = true, b = true }
+    S2.update(run)
+    check("regroup", run.data.phase, "regroup")
+    check("regroup notice", told[#told], "Enemy are regrouping, heal up and prepare for another wave!")
+    check("regroup deadline", run.data.at, run.elapsed + 300)
+    check("regroup bar", run.barText .. run.barTitle, "Incoming WaveUnder Siege 2/2")
+    check("regroup countdown", run.barAt, R.clock() + 300)
+    check("not due", S2.due(run), false)
+    run.elapsed = run.data.at
+    S2.update(run)
+    check("incoming", run.data.phase, "incoming")
+    check("warn notice", told[#told], "They are coming!")
+    check("warn deadline", run.data.at, run.elapsed + 30)
+    run.elapsed = run.data.at
+    S2.update(run)
+    check("wave 2 attacking", run.data.phase .. run.data.wave, "attacking2")
+    check("cumulative want", run.data.want, 4)
+    run.data.uids, run.data.dead = { "a", "b", "c", "d" }, { a = true, b = true, c = true, d = true }
+    check("last wave dead ends it", S2.update(run), "siege broken, all attackers dead")
+    check("pushed back notice", told[#told], "Enemy has been pushed back.")
+    -- a 0.1.0 run has no phase: it carries on as attacking
+    local old = { id = 991, eventId = "siege", state = "active", title = "S", x = 1, y = 1, elapsed = 0, lastSeen = now, placed = true,
+        options = { title = "S", waves = 1, waveMinutes = 5, waveWarnSeconds = 30 },
+        data = { base = "B", wave = 1, nextWave = 0, want = 1, uids = { "a" }, dead = {}, claimUntil = now + 100 } }
+    check("old: not due", S2.due(old), false)
+    check("old: running", S2.update(old), false)
+    check("old: attacking", old.data.phase, "attacking")
+    old.data.dead.a = true
+    check("old: ends", S2.update(old), "siege broken, all attackers dead")
+    check("remaining survives", select(2, S2.remaining(run)), "attackers")
+    R.toNear, SEM.Compat_ALife, Sp.playerNear, Sp.nearestPlayer, S2.waveSquare, Cp.hookALife, SEM.Targets.players = realToNear, realAL, realNear, realNearest, realSq, realHook, realPlayers
+    freshWorld()
+end)
+
+t("admin dot: exact site reaches admins only", function()
+    freshWorld()
+    local o = Store.config.events.airdrop.options
+    Store.config.limits.maxConcurrent = 5
+    o.markerOn, o.markerExact, o.fuzzyRadius = true, false, 50
+    local players = SEM.Targets.players
+    SEM.Targets.players = function() return { adminA, plain } end
+    sent = {}
+    local r = R.begin("airdrop", "force")
+    local function exacts(who)
+        local out = {}
+        for _, s in ipairs(sent) do
+            if s.to == who and (s.cmd == "markerExact" or s.cmd == "markerExactState") then out[#out + 1] = s end
+        end
+        return out
+    end
+    check("plain gets no dot", #exacts(plain), 0)
+    local e = exacts(adminA)
+    check("admin gets a dot", e[#e].cmd, "markerExact")
+    check("admin exact x", e[#e].args.x, r.x)
+    check("admin exact y", e[#e].args.y, r.y)
+    check("fuzzy marker differs", r.marker.x ~= r.x or r.marker.y ~= r.y, true)
+    sent = {}
+    R.crateLanded(r, r.x + 3, r.y + 4)
+    e = exacts(adminA)
+    check("admin dot follows the crate", e[#e].args.x .. "," .. e[#e].args.y, (r.x + 3) .. "," .. (r.y + 4))
+    check("plain still none", #exacts(plain), 0)
+    sent = {}
+    R.markerAt(r, 7, 9)
+    e = exacts(adminA)
+    check("admin dot follows a moved marker", e[#e].args.x .. "," .. e[#e].args.y, "7,9")
+    check("plain none after move", #exacts(plain), 0)
+    send(plain, "hello", {})
+    check("plain hello has no dots", #exacts(plain), 0)
+    sent = {}
+    send(adminA, "hello", {})
+    e = exacts(adminA)
+    check("admin hello has dots", e[1].cmd, "markerExactState")
+    check("admin hello dot", e[1].args.dots[1].x .. "," .. e[1].args.dots[1].y, "7,9")
+    o.markerOn = false
+    local off = R.begin("airdrop", "force")
+    check("marker off still shows admin", off.marker, nil)
+    check("marker off exact kept", off.exact ~= nil, true)
+    SEM.Targets.players = players
+end)
+
+t("D44: minAgeDays filters random player picks only", function()
+    local T = SEM.Targets
+    check("old enough", T.oldEnough(48, 2), true)
+    check("too young", T.oldEnough(47, 2), false)
+    check("default 0", T.oldEnough(0, 0), true)
+    check("nil days", T.oldEnough(0, nil), true)
+    check("unknown hours", T.oldEnough(nil, 5), true)
+    local function pl(h) return { getHoursSurvived = function() return h end } end
+    local failing = { getHoursSurvived = function() error("x") end }
+    local real = T.players
+    T.players = function() return { pl(10), pl(100), failing } end
+    check("eligible", #T.eligible({ minAgeDays = 2 }), 2)
+    check("nil option", #T.eligible({}), 3)
+    T.players = function() return { pl(10), pl(100) } end
+    local x, why = realResolve({ locationMode = "nearRandomPlayer", minAgeDays = 30 })
+    check("none qualify", why, "no player is at least 30 days old")
+    T.players = real
+    local ctx = { players = function() return { { name = "a", x = 0, y = 0, hours = 10 }, { name = "b", x = 5, y = 5, hours = 100 } } end }
+    local r = SEM.Events.horde.pickTarget({ targetType = "nearestPlayer", minAgeDays = 2 }, ctx, function() return 0 end)
+    check("horde picks old", r.name, "b")
+    SEM.Events.horde.where(r, ctx, 0, 0)
+    check("where keeps filter", r.name, "b")
+    local _, w = SEM.Events.horde.pickTarget({ targetType = "nearestPlayer", minAgeDays = 9 }, ctx, function() return 0 end)
+    check("horde none", w, "no player is at least 9 days old")
+    check("horde nil option", SEM.Events.horde.pickTarget({ targetType = "nearestPlayer" }, ctx, function() return 0 end).name, "a")
+    local f
+    for _, o in ipairs(SEM.EventDefs.byId.hunted.options) do if o.key == "minAgeDays" then f = o end end
+    check("hunted option", f.max .. f.default .. f.showIf.equals, "3650" .. "0" .. "randomPlayer")
+end)
+
+t("D43: stranger protection", function()
+    local S, AL = SEM.Events.stranger, SEM.Compat_ALife
+    local f
+    for _, o in ipairs(SEM.EventDefs.byId.stranger.options) do if o.key == "protectSeconds" then f = o end end
+    check("option", f.default .. f.max .. f.group, "60300Rescue")
+    local calls = {}
+    local realP, realH = AL.protect, SEM.Events.camp.hookALife
+    AL.protect = function(uid, on) calls[#calls + 1] = uid .. tostring(on) return true end
+    SEM.Events.camp.hookALife = function() end
+    local run = { id = 995, eventId = "stranger", state = "active", x = 1, y = 1, elapsed = 0, placed = true, options = { rewardRange = 5, repBonus = 1 },
+        data = { want = 1, uids = { "u" }, dead = {}, protectUntil = R.clock() + 30 } }
+    S.state[995] = { refs = { {} }, tracked = 1 }
+    local realAlive = SEM.Spawn.alive
+    SEM.Spawn.alive = function() return true end
+    S.update(run)
+    check("reapplied", calls[1], "utrue")
+    run.data.protectUntil = R.clock() - 1
+    S.update(run)
+    check("off after", calls[2], "ufalse")
+    check("cleared", run.data.protectUntil, nil)
+    run.data.dead.u = true
+    local realFail, why = R.fail, nil
+    R.fail = function(_, reason) why = reason end
+    check("dies anyway", S.update(run), false)
+    check("as a failure", why, "the stranger died, no reward")
+    R.fail = realFail
+    run.data.protectUntil = R.clock() + 30
+    S.stop(run)
+    check("stop off", calls[#calls], "ufalse")
+    AL.protect, SEM.Events.camp.hookALife, SEM.Spawn.alive = realP, realH, realAlive
+    S.state[995] = nil
+    check("protect without body", AL.protect == realP and AL.protect("none", true), false)
+end)
+
+-- B7a: Json and config export/import
+require "SEM/Json"
+local J = SEM.Json
+t("json encode", function()
+    check("empty", J.encode({}), "{}")
+    check("int", J.encode(5), "5")
+    check("neg float", J.encode(-0.5), "-0.5")
+    check("bool", J.encode(true), "true")
+    check("sorted", J.encode({ b = 1, a = { 1, 2 } }), '{\n  "a": [\n    1,\n    2\n  ],\n  "b": 1\n}')
+    check("escapes", J.encode('a"b\\c\n\t\1'), '"a\\"b\\\\c\\n\\t\\u0001"')
+    check("unicode raw", J.encode("h\195\169"), '"h\195\169"')
+    check("nan", select(2, J.encode(0 / 0)) ~= nil, true)
+    check("inf", J.encode(math.huge), nil)
+    check("fn", J.encode({ f = print }), nil)
+    check("sparse keys", J.encode({ [6] = true }), '{\n  "6": true\n}')
+    local deep, d = {}, {}
+    deep = d
+    for _ = 1, 30 do d.x = {}; d = d.x end
+    check("depth 32 ok", J.encode(deep) ~= nil, true)
+    d.x = {}; d = d.x
+    d.x = {}
+    check("too deep", J.encode(deep), nil)
+    local cyc = {}; cyc.me = cyc
+    check("cycle", J.encode(cyc), nil)
+end)
+local function jbad(label, text, want)
+    local v, err = J.decode(text)
+    check(label .. " nil", v, nil)
+    check(label .. " err", type(err) == "string" and err:find("^line %d+, column %d+: ") ~= nil, true)
+    if want then check(label .. " msg", err:find(want, 1, true) ~= nil, true) end
+end
+t("json decode good", function()
+    check("num", J.decode(" -12.5e1 "), -125)
+    check("str", J.decode('"a\\u00e9\\n\\/"'), "a\195\169\n/")
+    check("pair", J.decode('"\\ud83d\\ude00"'), "\240\159\152\128")
+    local v = J.decode('{"a":[1,null,2],"n":null,"o":{}}')
+    check("null in list closes", #v.a, 2); check("null dropped", v.n, nil); check("obj", type(v.o), "table")
+    check("dup last wins", J.decode('{"a":1,"a":2}').a, 2)
+    check("null alone", select(2, J.decode("null")), nil)
+    check("big exp ok", J.decode("1e300"), 1e300)
+    check("long digits", J.decode(string.rep("9", 400)), nil)
+end)
+t("json decode malformed", function()
+    jbad("empty", ""); jbad("ws", "  \n ")
+    jbad("trunc str", '"abc'); jbad("trunc esc", '"abc\\'); jbad("trunc u", '"\\u12'); jbad("bad u", '"\\u12G4"')
+    jbad("bad esc", '"\\x"'); jbad("ctrl", '"a\nb"'); jbad("nul", 'a\0')
+    jbad("lone hi", '"\\ud83d"'); jbad("lone lo", '"\\ude00"'); jbad("hi+x", '"\\ud83d\\u0041"')
+    jbad("trailing", "1 2", "unexpected content"); jbad("trailing brace", "{} }")
+    jbad("comma", '{"a":1 "b":2}', "expected ','"); jbad("trailing comma", "[1,]"); jbad("trailing comma o", '{"a":1,}')
+    jbad("colon", '{"a" 1}', "expected ':'"); jbad("key", "{1:2}"); jbad("open", "[1,2"); jbad("open o", '{"a":')
+    jbad("lead zero", "01"); jbad("dot", "1."); jbad("dot2", ".5"); jbad("exp", "1e"); jbad("minus", "-"); jbad("plus", "+1")
+    jbad("huge", "1e999"); jbad("hugeneg", "-1e999"); jbad("lit", "tru"); jbad("lit2", "nul"); jbad("junk", "@")
+    jbad("single quote", "'a'")
+    local _, err = J.decode('{\n  "a": 1\n  "b": 2\n}')
+    check("line col", err:sub(1, 20), "line 3, column 3: ex")
+    jbad("too big", string.rep(" ", 1048577) .. "1", "1 MiB")
+    check("at limit ok", J.decode(string.rep(" ", 1048575) .. "1"), 1)
+    check("non-string", select(2, J.decode(5)) ~= nil, true)
+end)
+t("json depth and speed", function()
+    check("32 ok", J.decode(string.rep("[", 32) .. string.rep("]", 32)) ~= nil, true)
+    jbad("33", string.rep("[", 33) .. string.rep("]", 33), "nesting")
+    jbad("deep open", string.rep("[", 100000))
+    jbad("deep obj", string.rep('{"a":', 100000))
+    local t0 = os.clock()
+    local big = J.decode('"' .. string.rep("x\\n", 300000) .. '"')
+    check("big string", #big, 600000)
+    local arr = J.decode("[" .. string.rep("1,", 200000) .. "1]")
+    check("big list", #arr, 200001)
+    check("fast", os.clock() - t0 < 3, true)
+end)
+
+local function cfgText() return J.encode(Store.exportConfig()) end
+local function importErr(label, mutate, want)
+    local base = J.decode(cfgText())
+    mutate(base)
+    local snap = flat(Store.config)
+    send(adminA, "importConfig", { text = J.encode(base) })
+    check(label .. " one reply", #sent, 1)
+    check(label .. " configError", sent[1].cmd, "configError")
+    check(label .. " to sender", sent[1].to, adminA)
+    check(label .. " names " .. want .. " in " .. tostring(sent[1].args.text), sent[1].args.text:find(want, 1, true) ~= nil, true)
+    check(label .. " unchanged", flat(Store.config), snap)
+end
+t("config export and import", function()
+    for id in pairs(Store.config.schedules) do Store.deleteSchedule(id) end
+    for n in pairs(Store.config.presets) do Store.deletePreset(n) end
+    Store.config.nextScheduleId = 1
+    send(adminA, "savePreset", { name = "Big", id = "airdrop", options = { crateCount = 3 } })
+    send(adminA, "saveSchedule", { name = "Nightly", eventId = "airdrop", preset = "Big", enabled = true,
+        schedule = { mode = "real", windows = { { days = { [6] = true, [7] = true }, startMin = 1200, endMin = 1260 } } }, conditions = {} })
+    send(adminA, "saveSchedule", { name = "Plain", eventId = "airdrop", enabled = false, schedule = { mode = "off" }, conditions = {} })
+    send(adminA, "saveLimits", { maxZombiesPerEvent = 77, maxConcurrent = 3 })
+    send(adminA, "savePacks", { packs = { { name = "Cars", vehicles = { "Base.CarNormal" } } } })
+    send(plain, "getConfig", {})
+    check("silent for non-admin", #sent, 0)
+    send(adminA, "getConfig", {})
+    check("only requester, one reply", #sent, 1)
+    check("export cmd", sent[1].cmd, "configExport"); check("to requester", sent[1].to, adminA)
+    local text = sent[1].args.text
+    check("stable", cfgText(), text)
+    local back = J.decode(text)
+    check("no runs", back.runs, nil); check("no history", back.history, nil); check("no world", back.queue, nil)
+    check("schema", back.schema, SEM.Config.SCHEMA)
+    check("no live times", back.schedules.s1.next, nil)
+    check("round trip", J.encode(back), text)
+    -- wipe, then import restores everything
+    local want = flat(Store.config)
+    send(adminA, "deleteSchedule", { id = "s1" }); send(adminA, "deleteSchedule", { id = "s2" })
+    send(adminA, "deletePreset", { name = "Big" }); send(adminA, "saveLimits", { maxZombiesPerEvent = 5, maxConcurrent = 1 })
+    send(plain, "importConfig", { text = text })
+    check("non-admin import silent", #sent, 0)
+    check("non-admin changed nothing", Store.presetCount(), 0)
+    send(adminB, "importConfig", { text = text })
+    check("notice last", sent[#sent].args.text, "Config imported")
+    local snaps = 0
+    for _, m in ipairs(sent) do if m.cmd == "snapshot" then snaps = snaps + 1 end end
+    check("snapshots pushed", snaps >= 1, true)
+    check("restored", flat(Store.config), want)
+    check("window days numeric", Store.config.schedules.s1.schedule.windows[1].days[7], true)
+    check("next id above", Store.config.nextScheduleId, 3)
+    send(adminA, "saveSchedule", { name = "Third", eventId = "airdrop", enabled = false, schedule = { mode = "off" }, conditions = {} })
+    check("new id s3", Store.config.schedules.s3 ~= nil, true)
+    send(adminA, "deleteSchedule", { id = "s3" })
+end)
+t("config import rejects", function()
+    importErr("bad field", function(c) c.events.airdrop.options.crateCount = 9999 end, "events.airdrop.options.crateCount")
+    importErr("bad limit", function(c) c.limits.maxConcurrent = 0 end, "limits.maxConcurrent")
+    importErr("unknown top key", function(c) c.runs = {} end, "runs")
+    importErr("unknown event", function(c) c.events.nope = { options = {} } end, "events.nope")
+    importErr("unknown preset event", function(c) c.presets.Big.eventId = "nope" end, "presets.Big.eventId")
+    importErr("bad preset opt", function(c) c.presets.Big.options.crateCount = 9999 end, "presets.Big.options.crateCount")
+    importErr("missing preset", function(c) c.presets = {} end, "schedules.s1.preset")
+    importErr("bad schedule", function(c) c.schedules.s2.schedule.mode = "sometimes" end, "schedules.s2.schedule.mode")
+    importErr("bad window", function(c) c.schedules.s1.schedule.windows[1].startMin = 7 end, "schedules.s1.schedule.windows.1")
+    importErr("dup name", function(c) c.schedules.s2.name = "Nightly" end, "name")
+    importErr("unknown entry key", function(c) c.schedules.s1.bogus = 1 end, "bogus")
+    importErr("bad id", function(c) c.schedules.x = c.schedules.s2; c.schedules.s2 = nil end, "schedules.x")
+    importErr("bad pack", function(c) c.vehiclePacks[1].name = "Random" end, "vehiclePacks")
+    importErr("bad loot pack", function(c) c.lootPacks = { { name = "L", items = "x" } } end, "lootPacks")
+    importErr("future schema", function(c) c.schema = 99 end, "schema")
+    importErr("too many schedules", function(c)
+        for i = 3, 52 do c.schedules["s" .. i] = { name = "n" .. i, eventId = "airdrop", enabled = false, schedule = { mode = "off" }, conditions = {} } end
+    end, "at most 50")
+    importErr("too many presets", function(c)
+        for i = 1, 50 do c.presets["p" .. i] = { eventId = "airdrop", options = {} } end
+    end, "at most 50")
+    importErr("too many packs", function(c)
+        c.vehiclePacks = {}
+        for i = 1, 31 do c.vehiclePacks[i] = { name = "p" .. i, vehicles = { "Base.CarNormal" } } end
+    end, "at most 30")
+    for _, text in ipairs({ "{", "[]x", "", "null", "[1]" }) do
+        local snap = flat(Store.config)
+        send(adminA, "importConfig", { text = text })
+        check("garbage " .. text, sent[1].cmd, "configError")
+        check("garbage unchanged", flat(Store.config), snap)
+    end
+    send(adminA, "importConfig", { text = 5 }); check("non-string", sent[1].cmd, "configError")
+    send(adminA, "importConfig", { text = string.rep(" ", 1048577) }); check("over limit", sent[1].cmd, "configError")
+end)
+t("config import migrates old export", function()
+    local old = J.decode(cfgText())
+    old.schema = nil
+    old.events.convoy.options.guardType = "none"
+    send(adminA, "importConfig", { text = J.encode(old) })
+    check("imported", sent[#sent].args.text, "Config imported")
+    check("migrated", Store.config.events.convoy.options.guardType, "zombies")
+    send(adminA, "importConfig", { text = "{}" })
+    check("empty object refused", sent[#sent].cmd, "configError")
+    check("says what is missing", sent[#sent].args.text:find("section is missing", 1, true) ~= nil, true)
+end)
+
+t("packList option: lists of pack names", function()
+    local sc = { { key = "p", type = "packList", default = { "Medium" } } }
+    local function v(x) local ok, c, e = O.validate(sc, { p = x }) return ok, c and c.p, e.p end
+    check("nil is the default", select(2, v(nil))[1], "Medium")
+    check("default is a copy", select(2, O.validate(sc, {})).p ~= sc[1].default, true)
+    check("empty list ok", #select(2, v({})), 0)
+    check("dups removed in order", table.concat(select(2, v({ "A", "random", "A", "random:low" })), ","), "A,random,random:low")
+    check("ten ok", (v({ "1", "2", "3", "4", "5", "6", "7", "8", "9", "10" })), true)
+    check("eleven refused", (v({ "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11" })), false)
+    check("41 chars refused", (v({ string.rep("x", 41) })), false)
+    check("40 chars ok", (v({ string.rep("x", 40) })), true)
+    check("string refused", (v("Medium")), false)
+    check("non-text entry refused", (v({ 5 })), false)
+    check("map refused", (v({ a = "x" })), false)
+    local def = SEM.EventDefs.byId.convoy
+    check("convoy defaults", #O.defaults(def.options).vehiclePack, 0)
+    check("loot default", O.defaults(def.options).lootPack[1], "Medium")
+    check("label list", SEM.Fmt.packLabel({ "Low", "random:high", "random" }), "Low, Random High Tier, Random pack")
+    check("label empty", SEM.Fmt.packLabel({}), "")
+end)
+
+t("packRows and packIds pick one listed entry", function()
+    local Sp, C2 = SEM.Spawn, SEM.Events.convoy
+    local packs = { { name = "A", picks = 0, items = { { item = "Base.Axe", chance = 1, min = 1, max = 1 } } },
+        { name = "B", picks = 0, items = { { item = "Base.Nails", chance = 1, min = 1, max = 1 } } } }
+    local function at(n) return function() return n end end
+    check("first listed", Sp.packRows({ "A", "B" }, packs, at(0))[1].item, "Base.Axe")
+    check("second listed", Sp.packRows({ "A", "B" }, packs, at(1))[1].item, "Base.Nails")
+    check("empty list", Sp.packRows({}, packs, at(0)), nil)
+    check("lootFor falls back on empty", Sp.lootFor({ lootPack = {} }), SEM.Config.LOOT_TIERS.medium)
+    local vp = { { name = "Mil", vehicles = { "Mod.Tank" } }, { name = "Civ", vehicles = { "Base.CarNormal" } } }
+    check("convoy first", C2.packIds({ "Mil", "Civ" }, vp, at(0))[1], "Mod.Tank")
+    check("convoy second", select(2, C2.packIds({ "Mil", "Civ" }, vp, at(1))), "Civ")
+    check("convoy empty list is default cars", select(2, C2.packIds({}, vp, at(0))), "")
+    check("convoy gone", select(2, C2.packIds({ "Nope" }, vp, at(0))), nil)
+end)
+
+t("migrate schema 3: pack options become lists", function()
+    local function cfg(schema)
+        return { schema = schema, events = { convoy = { options = { guardType = "none", lootPack = "Low", vehiclePack = "" } } },
+            presets = { C = { eventId = "convoy", options = { guardType = "none", lootPack = "", vehiclePack = "Mil" } } } }
+    end
+    for _, from in ipairs({ 1, 2 }) do
+        local c = cfg(from)
+        Store.migrate(c)
+        local o, p = c.events.convoy.options, c.presets.C.options
+        check(from .. " loot", o.lootPack[1] .. #o.lootPack, "Low1")
+        check(from .. " empty vehicle", #o.vehiclePack, 0)
+        check(from .. " preset", #p.lootPack .. p.vehiclePack[1], "0Mil")
+        check(from .. " guard step only before 2", o.guardType, from == 1 and "zombies" or "none")
+    end
+    local c = cfg(3)
+    Store.migrate(c)
+    check("schema 3 untouched", c.events.convoy.options.lootPack, "Low")
+    check("schema is 3", SEM.Config.SCHEMA, 3)
+    local e = J.decode(cfgText())
+    e.events.convoy.options.lootPack = "Low"
+    e.schema = 2
+    check("import 2 to 3", Store.buildConfig(e).events.convoy.options.lootPack[1], "Low")
+    e.schema = 3
+    e.events.convoy.options.lootPack = { "Low", "High" }
+    check("import 3", #Store.buildConfig(e).events.convoy.options.lootPack, 2)
+end)
+
+t("D39: Default preset, renamePreset, forceEvent with a preset", function()
+    freshWorld()
+    for n in pairs(Store.config.presets) do Store.deletePreset(n) end
+    for _, n in ipairs({ "Default", "default", "DEFAULT" }) do
+        send(adminA, "savePreset", { id = "airdrop", name = n, options = {} })
+        check("save refuses " .. n, sent[1].cmd, "error")
+    end
+    check("none stored", Store.presetCount(), 0)
+    send(adminA, "savePreset", { id = "airdrop", name = "One", options = { crateCount = 2 } })
+    send(adminA, "savePreset", { id = "camp", name = "Two", options = {} })
+    send(adminA, "saveSchedule", { name = "S1", eventId = "airdrop", preset = "One", enabled = false, schedule = { mode = "off" }, conditions = {} })
+    send(adminA, "saveSchedule", { name = "S2", eventId = "airdrop", enabled = false, schedule = { mode = "off" }, conditions = {} })
+    local function sched(n) for _, e in pairs(Store.config.schedules) do if e.name == n then return e end end end
+    local function bad(why, a)
+        local before = flat(Store.config)
+        send(adminA, "renamePreset", a)
+        check(why, sent[1].cmd, "error")
+        check(why .. " changed nothing", flat(Store.config), before)
+    end
+    bad("same name", { id = "airdrop", old = "One", new = "One" })
+    bad("existing name", { id = "airdrop", old = "One", new = "Two" })
+    bad("to Default", { id = "airdrop", old = "One", new = "default" })
+    bad("from Default", { id = "airdrop", old = "Default", new = "X" })
+    bad("unknown old", { id = "airdrop", old = "Nope", new = "X" })
+    bad("other event", { id = "airdrop", old = "Two", new = "X" })
+    bad("unknown event", { id = "nope", old = "One", new = "X" })
+    bad("long new", { id = "airdrop", old = "One", new = string.rep("x", 41) })
+    bad("empty new", { id = "airdrop", old = "One", new = "" })
+    bad("non-text old", { id = "airdrop", old = 5, new = "X" })
+    send(adminA, "renamePreset", { id = "airdrop", old = "One", new = "Uno", reqId = "r" })
+    check("replies snapshot", snapshotsTo(adminA)[1].args.ack, "r")
+    check("saved notice", sent[#sent].args.text, "Saved")
+    check("moved", Store.config.presets.One, nil)
+    check("kept options", Store.config.presets.Uno.options.crateCount, 2)
+    check("schedule follows", sched("S1").preset, "Uno")
+    check("Default schedule untouched", sched("S2").preset, "")
+    send(adminA, "deletePreset", { name = "Default" })
+    check("Default cannot be deleted", sent[1].cmd, "error")
+
+    local began
+    local begin = SEM.Runner.begin
+    SEM.Runner.begin = function(id, src, o) began = { id = id, src = src, o = o } return { id = 1 } end
+    send(adminA, "forceEvent", { id = "airdrop" })
+    check("no preset runs the event options", began.o, nil)
+    send(adminA, "forceEvent", { id = "airdrop", preset = "Uno" })
+    check("preset options", began.o.crateCount, 2)
+    check("still forced", began.src, "force")
+    began = nil
+    for _, p in ipairs({ "Nope", "Two", 5, true }) do
+        send(adminA, "forceEvent", { id = "airdrop", preset = p })
+        check("force refuses " .. tostring(p), sent[1].cmd, "error")
+    end
+    check("nothing started", began, nil)
+    SEM.Runner.begin = begin
+    Store.deletePreset("Uno"); Store.deletePreset("Two")
+    for id in pairs(Store.config.schedules) do Store.deleteSchedule(id) end
+end)
+
+t("a deleted pack in a list gives way to the others", function()
+    local packs = { { name = "A", items = { { item = "x" } }, picks = 0 } }
+    check("skips the gone one", SEM.Spawn.packRows({ "Gone", "A" }, packs, function() return 0 end)[1].item, "x")
+    check("none left", SEM.Spawn.packRows({ "Gone" }, packs, function() return 0 end), nil)
+    check("empty", SEM.Spawn.packRows({}, packs, function() return 0 end), nil)
+end)
+
+t("#26: flyover goes out when the crates are placed, not in the warning", function()
+    local L = "ServerEventManager/Contents/mods/ServerEventManager/42/media/lua/"
+    local Sp, keepAd = SEM.Spawn, SEM.Events.airdrop
+    local real = dofile(L .. "server/SEM/Events/Airdrop.lua")
+    SEM.Events.airdrop = keepAd
+    local keep = { Sp.defer, Sp.clearSite, Sp.placeCrates, Sp.siteGuards }
+    local log = {}
+    local undo = stubRunner(log)
+    local placeFn
+    Sp.defer = function(_, _, _, fn) placeFn = fn end
+    Sp.clearSite = function() end
+    Sp.siteGuards = function() end
+    local sites = { 1 }
+    Sp.placeCrates = function() return sites end
+    local function go(opts)
+        sent, placeFn = {}, nil
+        local run = { id = 77, options = opts, data = {} }
+        real.start(run)
+        check("nothing sent while waiting", #sent, 0)
+        placeFn()
+        return run
+    end
+    online = { adminA }
+    go({ soundOn = true, flyoverSound = true, requireRadio = true })
+    check("one command", #sent, 1)
+    check("flyover", sent[1].cmd, "flyover")
+    check("run id", sent[1].args.id, 77)
+    check("radio gate", sent[1].args.radio, true)
+    go({ soundOn = false, flyoverSound = true })
+    check("sound off: none", #sent, 0)
+    go({ soundOn = true, flyoverSound = false })
+    check("flyover off: none", #sent, 0)
+    sites = {}
+    go({ soundOn = true, flyoverSound = true })
+    check("no crates placed: none", #sent, 0)
+    Sp.defer, Sp.clearSite, Sp.placeCrates, Sp.siteGuards = keep[1], keep[2], keep[3], keep[4]
+    undo()
+    check("FLYOVER_SECONDS", SEM.Config.FLYOVER_SECONDS, 10)
+    freshWorld()
+    local o = Store.config.events.airdrop.options
+    o.soundOn, o.flyoverSound, o.leadMinutes = true, true, 2
+    sent = {}
+    R.begin("airdrop", "force")
+    check("warning alert has no flyover", sent[1].args.flyover, nil)
+end)
+
+t("final review: queue, siege and stranger edges", function()
+    local q = SEM.Store.world.queue
+    q[#q + 1] = { id = 88001, scheduleId = "s9901" }
+    SEM.Store.deleteSchedule("s9901")
+    for _, e in ipairs(q) do check("no ghost entry", e.scheduleId == "s9901", false) end
+    local Si, St = SEM.Events.siege, SEM.Events.stranger
+    check("a siege that times out fails", Si.timeUpFails, true)
+    check("an old run with no deadline is safe", Si.due({ elapsed = 5, data = { phase = "incoming" } }), false)
+    local run = { options = { reachMinutes = 5 }, data = { want = 1, placing = true } }
+    St.start(run)
+    check("mid-spawn restart released", run.placed, true)
+    check("placing cleared", run.data.placing, nil)
 end)
 
 print("ok (" .. tests .. " checks)")

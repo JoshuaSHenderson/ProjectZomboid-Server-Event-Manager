@@ -13,9 +13,17 @@ SEM.Events.stranger = Stranger
 
 Stranger.state = {} -- run id -> { refs }; Java objects never go into run.data
 
+-- D43. Protection is invulnerability on the NPC's body, set again each update because bodies come and go. UNPROVEN: NPC AI runs
+-- on clients, so the server's setGodMod may not stop damage (spike S9). A stranger who dies anyway still fails the event.
+local function guard(d)
+    local uid = d.uids and d.uids[1]
+    if uid then SEM.Compat_ALife.protect(uid, true) end
+end
+
 local function arrive(run, o)
     local d = run.data
     -- a player 40 tiles out may not have loaded the site yet, so no ground is not a failure: update asks again until Reach Minutes end
+    Spawn.clearSite(run, o)
     local sq = Spawn.findSquare(run.x, run.y, 25, o)
     if not sq then return SEM.Runner.status(run, "A player is close, waiting for ground near the stranger to load") end
     local made, faction, why = SEM.Compat_ALife.spawnStranger(Spawn.nearestPlayer(run.x, run.y), sq:getX(), sq:getY(), 0)
@@ -34,12 +42,19 @@ local function arrive(run, o)
         st.tracked = spawned
         if spawned == 0 then return SEM.Runner.fail(run, "no loaded ground for the zombies") end
         run.placed = true
+        if (o.protectSeconds or 0) > 0 then
+            d.protectUntil = SEM.Runner.clock() + o.protectSeconds
+            guard(d)
+        end
     end)
 end
 
 function Stranger.start(run)
     run.data = run.data or {}
-    if run.data.want then return end -- restarted: the stranger stays, the wave is not spawned twice
+    if run.data.want then -- restarted mid-spawn: the stranger stays, the wave is not spawned twice, and update releases the run
+        run.data.placing, run.placed = nil, true
+        return
+    end
     SEM.Runner.status(run, "Calling for help, " .. run.options.reachMinutes .. " min to reach them")
 end
 
@@ -56,13 +71,20 @@ end
 function Stranger.update(run)
     local d, o = run.data, run.options
     if not d.want then
-        if run.elapsed >= o.reachMinutes * 60 then return "nobody reached the stranger in time" end
+        if run.elapsed >= o.reachMinutes * 60 then SEM.Runner.fail(run, "nobody reached the stranger in time") return false end
         if Spawn.playerNear(run.x, run.y, C.STRANGER_NEAR) then arrive(run, o) end
         return false
     end
     Camp.hookALife()
     if not run.placed then return false end
-    if Camp.deadCount(d) > 0 then return "the stranger died, no reward" end
+    if Camp.deadCount(d) > 0 then SEM.Runner.fail(run, "the stranger died, no reward") return false end
+    if d.protectUntil then
+        if SEM.Runner.clock() < d.protectUntil then guard(d)
+        else
+            if d.uids[1] then SEM.Compat_ALife.protect(d.uids[1], false) end
+            d.protectUntil = nil
+        end
+    end
     local st = Stranger.state[run.id]
     if not st then return "released by a restart; no reward" end
     local keep = {}
@@ -70,7 +92,8 @@ function Stranger.update(run)
     st.refs = keep
     if #keep == 0 then return reward(run, o) end
     pcall(function() getWorldSoundManager():addSound(nil, run.x, run.y, 0, C.STRANGER_NEAR, C.STRANGER_NEAR) end) -- keeps the wave on them
-    SEM.Runner.status(run, #keep .. " of " .. st.tracked .. " zombies left, stranger alive")
+    local safe = d.protectUntil and ", protected " .. math.ceil(d.protectUntil - SEM.Runner.clock()) .. "s" or ""
+    SEM.Runner.status(run, #keep .. " of " .. st.tracked .. " zombies left, stranger alive" .. safe)
     return false
 end
 
@@ -81,6 +104,8 @@ end
 
 function Stranger.stop(run)
     Stranger.state[run.id] = nil
+    local d = run.data
+    if d and d.protectUntil and d.uids and d.uids[1] then SEM.Compat_ALife.protect(d.uids[1], false) end
     return run.data and run.data.want and "the stranger stays in the world; A-Life manages them" or nil
 end
 

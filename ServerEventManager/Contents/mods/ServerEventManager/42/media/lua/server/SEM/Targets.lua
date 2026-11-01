@@ -18,6 +18,91 @@ function Targets.players()
     return out
 end
 
+-- D44. Hours the character has lived, or nil when the game will not say. The one place that asks (spike S8 confirms the unit in play).
+function Targets.hours(p)
+    local ok, h = pcall(function() return p:getHoursSurvived() end)
+    return ok and h or nil
+end
+
+-- D44. Pure. True when hours of life make at least days days; unknown hours count as old enough.
+function Targets.oldEnough(hours, days)
+    if not hours or not days or days <= 0 then return true end
+    return hours / 24 >= days
+end
+
+-- D44. The online players old enough for o.minAgeDays (nil counts as 0). Random picks use it; named players ignore it.
+function Targets.eligible(o)
+    local out = {}
+    for _, p in ipairs(Targets.players()) do
+        if Targets.oldEnough(Targets.hours(p), o.minAgeDays) then out[#out + 1] = p end
+    end
+    return out
+end
+
+-- who is online: { names = set of usernames and A-Life keys, factions = set of vanilla faction names }
+function Targets.online()
+    local on = { names = {}, factions = {} }
+    for _, p in ipairs(Targets.players()) do
+        on.names[tostring(p:getUsername())] = true
+        local key, faction = SEM.Compat_ALife.keyOf(p), SEM.Compat_ALife.factionOf(p)
+        if key then on.names[key] = true end
+        if faction then on.factions[faction] = true end
+    end
+    return on
+end
+
+-- D46. Pure. True when the owner, creator or a member of base b is online. A base that names nobody cannot be ruled out.
+function Targets.baseOnline(b, on)
+    if b.ownerKind == "faction" then return on.factions[b.owner] == true end
+    if b.owner == nil and b.createdBy == nil and not b.members then return true end
+    if on.names[b.owner] or on.names[b.createdBy] then return true end
+    for _, m in ipairs(b.members or {}) do if on.names[m] then return true end end
+    return false
+end
+
+local function mark(list)
+    local on = Targets.online()
+    for _, b in ipairs(list) do b.offline = not Targets.baseOnline(b, on) end
+    return list
+end
+
+local function online(list)
+    local out = {}
+    for _, b in ipairs(list) do if not b.offline then out[#out + 1] = b end end
+    return out
+end
+
+-- every safehouse: { id, owner, members, x, y, w, h, offline }; x, y is its centre
+function Targets.safehouses()
+    local out = {}
+    pcall(function()
+        local list = SafeHouse.getSafehouseList()
+        for i = 0, list:size() - 1 do
+            local s = list:get(i)
+            local e = { id = tostring(s:getTitle()), owner = tostring(s:getOwner()), members = {}, x = s:getX(), y = s:getY(), w = 0, h = 0 }
+            pcall(function() e.w, e.h = s:getW(), s:getH() end)
+            e.x, e.y = e.x + math.floor(e.w / 2), e.y + math.floor(e.h / 2)
+            pcall(function()
+                local m = s:getPlayers()
+                for j = 0, m:size() - 1 do e.members[#e.members + 1] = tostring(m:get(j)) end
+            end)
+            out[#out + 1] = e
+        end
+    end)
+    return mark(out)
+end
+
+-- Jeem bases and A-Life homes, nil when that mod is absent, each with offline set
+function Targets.jeem()
+    local list = SEM.Compat_ALife.baseList()
+    return list and mark(list)
+end
+
+function Targets.homes()
+    local list = SEM.Compat_ALife.homes()
+    return list and mark(list)
+end
+
 -- Note: getZonesAt reads map data, so it answers for squares whose chunk is not loaded (vanilla's
 -- foraging and admin tools call it the same way).
 function Targets.classAt(x, y)
@@ -112,11 +197,13 @@ end
 
 -- anchor = { x, y } saved by Runner.begin (D16): the spot of a player at announce, used when everyone has left since
 function mode.nearRandomPlayer(o, anchor)
-    local list = Targets.players()
+    local list = Targets.eligible(o)
     local cx, cy
     if #list > 0 then
         local pl = pick(list)
         cx, cy = pl:getX(), pl:getY()
+    elseif #Targets.players() > 0 then
+        return nil, "no player is at least " .. o.minAgeDays .. " days old"
     elseif anchor then
         cx, cy = anchor.x, anchor.y
     else
@@ -135,46 +222,43 @@ function mode.nearChosenPlayer(o)
 end
 
 function mode.randomSafehouse(o)
-    local list = SafeHouse.getSafehouseList()
-    if not list or list:size() == 0 then return nil, "no safehouses exist" end
-    local s = list:get(ZombRand(list:size()))
-    local w, h = 0, 0
-    pcall(function() w, h = s:getW(), s:getH() end)
-    return clear({ x = s:getX() + math.floor(w / 2), y = s:getY() + math.floor(h / 2), z = 0 }, o)
+    local all = Targets.safehouses()
+    if #all == 0 then return nil, "no safehouses exist" end
+    local list = online(all)
+    if #list == 0 then return nil, "no safehouse has anyone online" end
+    local s = pick(list)
+    return clear({ x = s.x, y = s.y, z = 0 }, o)
 end
 
 function mode.randomJeemBase(o)
-    local bases = SEM.Compat_ALife.baseList()
-    if not bases or #bases == 0 then return nil, "no Jeem bases (Project A-Life Jimmy not loaded or none exist)" end
+    local all = Targets.jeem()
+    if not all or #all == 0 then return nil, "no Jeem bases (Project A-Life Jimmy not loaded or none exist)" end
+    local bases = online(all)
+    if #bases == 0 then return nil, "no Jeem base has anyone online" end
     local b = pick(bases)
     return clear({ x = b.x, y = b.y, z = b.z or 0 }, o)
 end
 
--- every base that exists now: { id, label, kind, x, y }. kind = safehouse, jeem or home. id is what Horde and Siege look a
--- base up by; the console shows this list in its base picker.
+-- every base that exists now: { id, label, kind, x, y, offline }. kind = safehouse, jeem or home. id is what Horde and Siege
+-- look a base up by; the console shows this list in its base picker.
 function Targets.bases()
     local out = {}
-    pcall(function()
-        local list = SafeHouse.getSafehouseList()
-        for i = 0, list:size() - 1 do
-            local s = list:get(i)
-            local title = tostring(s:getTitle())
-            out[#out + 1] = { id = title, label = title .. " (" .. tostring(s:getOwner()) .. ")", kind = "safehouse",
-                x = s:getX() + math.floor(s:getW() / 2), y = s:getY() + math.floor(s:getH() / 2) }
-        end
-    end)
-    for _, b in ipairs(SEM.Compat_ALife.baseList() or {}) do
-        out[#out + 1] = { id = tostring(b.id), label = "Jeem base " .. tostring(b.id), kind = "jeem", x = b.x, y = b.y }
+    for _, s in ipairs(Targets.safehouses()) do
+        out[#out + 1] = { id = s.id, label = s.id .. " (" .. s.owner .. ")", kind = "safehouse", x = s.x, y = s.y, offline = s.offline }
     end
-    for _, h in ipairs(SEM.Compat_ALife.homes() or {}) do
-        out[#out + 1] = { id = h.id, label = "A-Life home " .. h.id, kind = "home", x = h.x, y = h.y }
+    for _, b in ipairs(Targets.jeem() or {}) do
+        out[#out + 1] = { id = tostring(b.id), label = "Jeem base " .. tostring(b.id), kind = "jeem", x = b.x, y = b.y, offline = b.offline }
+    end
+    for _, h in ipairs(Targets.homes() or {}) do
+        out[#out + 1] = { id = h.id, label = "A-Life home " .. h.id, kind = "home", x = h.x, y = h.y, offline = h.offline }
     end
     return out
 end
 
 -- anchor as in nearRandomPlayer: with everyone offline the search runs around where a player stood at the announcement (D16)
 function mode.countryside(o, anchor)
-    local list = Targets.players()
+    local list = Targets.eligible(o)
+    if #list == 0 and #Targets.players() > 0 then return nil, "no player is at least " .. o.minAgeDays .. " days old" end
     if #list == 0 and not anchor then return nil, "no players online to search around" end
     local b = Targets.bounds()
     for _ = 1, C.SAMPLES do

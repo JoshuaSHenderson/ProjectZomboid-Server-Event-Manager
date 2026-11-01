@@ -103,6 +103,18 @@ function check.vehicleList(f, v)
     return out
 end
 
+-- a list of pack names (D40); duplicates are dropped
+function check.packList(f, v)
+    local ok, err = isList(v, 10)
+    if not ok then return nil, err end
+    local out, seen = {}, {}
+    for i, e in ipairs(v) do
+        if type(e) ~= "string" or #e < 1 or #e > 40 then return nil, "entry " .. i .. ": pack name of 1 to 40 characters" end
+        if not seen[e] then seen[e] = true; out[#out + 1] = e end
+    end
+    return out
+end
+
 function Options.defaults(schema)
     local d = {}
     for _, f in ipairs(schema) do d[f.key] = copy(f.default) end

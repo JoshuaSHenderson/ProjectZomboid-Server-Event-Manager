@@ -1,5 +1,6 @@
 -- Server Event Manager: Convoy Wreck. Damaged vehicles on a road (road sites preferred), a loot crate beside them and
--- optional guards. Ends when the crate is empty or the duration is up; the wrecks stay in the world.
+-- guards (zombies or NPCs, never none). Ends when every guard is dead or the duration is up, not on loot: the crate and the
+-- wrecks stay in the world.
 if isClient() then return end
 require "SEM/Config"
 require "SEM/Spawn"
@@ -9,6 +10,7 @@ local Convoy = {}
 SEM.Events = SEM.Events or {}
 SEM.Events.convoy = Convoy
 Convoy.preferClass = "road" -- Runner passes this to Targets.resolve
+Convoy.state = {} -- run id -> { refs, tracked, total } for zombie guards; Java objects never go into run.data
 
 -- ---- pure (specs in tests/run.lua) ----
 
@@ -27,19 +29,21 @@ function Convoy.usable(list, known)
     return ids, skipped
 end
 
--- the vehicle ids of a pack option: "" is none (default cars), "random" any pack with vehicles. packs = list of { name, vehicles };
--- rand(n) gives 0..n-1. Second value is the pack used, or nil when the named one no longer exists.
-function Convoy.packIds(name, packs, rand)
+-- the vehicle ids of a pack option, a list of which one entry is picked: an empty list is none (default cars), "random" any pack with
+-- vehicles. packs = list of { name, vehicles }; rand(n) gives 0..n-1. Second value is the pack used, or nil when the picked one no
+-- longer exists; third is the entry picked.
+function Convoy.packIds(names, packs, rand)
+    if #names == 0 then return {}, "" end
+    local name = names[rand(#names) + 1]
     if name == "random" then
         local full = {}
         for _, p in ipairs(packs) do if #p.vehicles > 0 then full[#full + 1] = p end end
-        if #full == 0 then return {}, "" end
+        if #full == 0 then return {}, "", name end
         local p = full[rand(#full) + 1]
-        return p.vehicles, p.name
+        return p.vehicles, p.name, name
     end
-    if name == "" then return {}, "" end
-    for _, p in ipairs(packs) do if p.name == name then return p.vehicles, name end end
-    return {}, nil
+    for _, p in ipairs(packs) do if p.name == name then return p.vehicles, name, name end end
+    return {}, nil, name
 end
 
 -- count picks with repeats allowed; rand(n) gives 0..n-1
@@ -101,9 +105,10 @@ local function vehicleSquare(x, y, radius, o, used)
 end
 
 local function place(run, o)
+    Spawn.clearSite(run, o)
     local known = knownVehicles()
-    local list, pack = Convoy.packIds(o.vehiclePack, SEM.Store.config.vehiclePacks, ZombRand)
-    if not pack then SEM.Runner.warn(run, "vehicle pack " .. o.vehiclePack .. " no longer exists, using the default cars") end
+    local list, pack, entry = Convoy.packIds(o.vehiclePack, SEM.Store.config.vehiclePacks, ZombRand)
+    if not pack then SEM.Runner.warn(run, "vehicle pack " .. entry .. " no longer exists, using the default cars") end
     local ids, skipped = Convoy.usable(list, known)
     if #skipped > 0 then SEM.Runner.warn(run, "unknown vehicle ids skipped: " .. table.concat(skipped, ", ")) end
     local squares, used, made, failed = {}, {}, 0, 0
@@ -135,13 +140,17 @@ local function place(run, o)
     local crates = Spawn.placeCrates(run, o, 1, false)
     if #crates == 0 then SEM.Runner.warn(run, "no room for the loot crate") end
     run.placed = true
+    local st = { refs = {} }
+    Convoy.state[run.id] = st
+    if o.guardType == "none" then o.guardType = "zombies" end -- saved before D45: guards are no longer optional
     local function report(guards, kind, sprinters)
+        st.total, st.tracked = guards, #st.refs
         SEM.Runner.status(run, "Wreck: " .. made .. " vehicle(s), " .. (#crates > 0 and "loot crate, " or "no crate, ") .. guards
             .. (kind ~= "" and " " .. kind or "") .. " guard(s)" .. (sprinters > 0 and ", " .. sprinters .. " sprinters" or ""))
     end
     local done = false
     run.data.placing = true
-    Spawn.siteGuards(run, o, #crates > 0 and crates or { squares[1] }, function(...) done = true; run.data.placing = nil; report(...) end)
+    Spawn.siteGuards(run, o, #crates > 0 and crates or { squares[1] }, function(...) done = true; run.data.placing = nil; report(...) end, st.refs)
     if not done then
         SEM.Runner.status(run, "Wreck: " .. made .. " vehicle(s), " .. (#crates > 0 and "loot crate, " or "no crate, ") .. "spawning guards")
     end
@@ -153,14 +162,47 @@ function Convoy.start(run)
     Spawn.defer(run, run.x, run.y, function() place(run, run.options) end)
 end
 
-function Convoy.update(run)
-    if not run.placed then return false end
-    Spawn.settle(run, "Wreck: " .. (run.data.vehicles or 0) .. " vehicle(s)")
-    return run.data.crates and Spawn.cratesEmpty(run) and "all loot taken" or false
+local function survey(st)
+    local keep = {}
+    for _, e in ipairs(st.refs) do if Spawn.alive(e) then keep[#keep + 1] = e end end
+    st.refs = keep
+    return #keep
 end
 
+function Convoy.update(run)
+    if not run.placed then return false end
+    local what = "Wreck: " .. (run.data.vehicles or 0) .. " vehicle(s)"
+    Spawn.settle(run, what)
+    local d, st, left, total = run.data, Convoy.state[run.id], nil, nil
+    if d.want then
+        local Camp = SEM.Events.camp
+        Camp.hookALife()
+        if Camp.cleared(d, SEM.Runner.clock()) then return "all guards dead" end
+        left, total = #d.uids - Camp.deadCount(d), #d.uids
+    elseif not st then
+        return "released by a restart; the guards stay in the world"
+    elseif st.total == 0 then
+        return "no guards spawned"
+    elseif st.tracked and st.tracked > 0 then -- with nothing tracked there is nothing to count dead
+        left, total = survey(st), st.tracked
+        if left == 0 then return "all guards dead" end
+    end
+    if left then SEM.Runner.status(run, what .. ", " .. left .. " of " .. total .. " guards left") end
+    return false
+end
+
+function Convoy.remaining(run)
+    if not run.placed then return nil end
+    if run.data.want then return SEM.Events.camp.npcPoints(run.data), "guards" end
+    local st = Convoy.state[run.id]
+    return Spawn.refPoints(st and st.refs), "guards"
+end
+
+-- the crate stays when the event ends; a cancel clears it away unless a player is near
 function Convoy.stop(run, why)
-    local notes = { Spawn.removeCrates(run, why, true) }
+    local notes = {}
+    if why == "cancel" then notes[1] = Spawn.removeCrates(run, why, false) else run.data.crates = nil end
+    Convoy.state[run.id] = nil
     local n = run.data and run.data.vehicles or 0
     if n > 0 then notes[#notes + 1] = n .. " wrecked vehicle(s) stay in the world" end
     if #notes == 0 then return nil end

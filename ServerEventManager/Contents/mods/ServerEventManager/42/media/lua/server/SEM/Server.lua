@@ -7,6 +7,7 @@ require "SEM/EventDefs"
 require "SEM/Store"
 require "SEM/Runner"
 require "SEM/Scheduler"
+require "SEM/Json"
 
 local MODULE = SEM.Config.MODULE
 local Store, O = SEM.Store, SEM.Options
@@ -17,7 +18,7 @@ local function name(player)
 end
 
 -- commands that echo an optional reqId back as `ack` (docs/schedule-contract.md)
-local ACKED = { saveEvent = true, saveSchedule = true, saveLootPacks = true, savePacks = true }
+local ACKED = { saveEvent = true, saveSchedule = true, saveLootPacks = true, savePacks = true, savePreset = true, renamePreset = true }
 
 local function validReqId(r)
     if type(r) == "string" then return #r >= 1 and #r <= 40 end
@@ -39,6 +40,11 @@ local function presetName(args)
     if type(n) ~= "string" or #n < 1 or #n > 40 then return nil, { name = "must be text, 1 to 40 characters" } end
     return n
 end
+
+-- Default is the event's own options (D39), never a stored preset
+local function isDefault(n) return n:lower() == "default" end
+
+local MAX_IMPORT = 1048576 -- 1 MiB of text in one sendClientCommand; ponytail: chunking is spike S11 if a real config outgrows it
 
 local admin = {}
 
@@ -87,6 +93,7 @@ function admin.savePreset(player, args)
     local n
     n, errs = presetName(args)
     if not n then return errs end
+    if isDefault(n) then return { name = "Default is reserved for the event's own settings" } end
     if not Store.config.presets[n] and Store.presetCount() >= Store.MAX_PRESETS then
         return { name = "at most " .. Store.MAX_PRESETS .. " presets" }
     end
@@ -104,8 +111,21 @@ end
 function admin.deletePreset(player, args)
     local n, errs = presetName(args)
     if not n then return errs end
-    if not Store.config.presets[n] then return { name = "no such preset" } end
+    if not Store.config.presets[n] then return { name = isDefault(n) and "Default cannot be deleted" or "no such preset" } end
     Store.deletePreset(n)
+end
+
+function admin.renamePreset(player, args)
+    local d, errs = def(args)
+    if not d then return errs end
+    local old, new = args.old, args.new
+    if type(old) ~= "string" or isDefault(old) then return { old = "Default cannot be renamed" } end
+    local p = Store.config.presets[old]
+    if not p or p.eventId ~= d.id then return { old = "no such preset for this event" } end
+    if type(new) ~= "string" or #new < 1 or #new > 40 then return { new = "must be text, 1 to 40 characters" } end
+    if isDefault(new) then return { new = "Default is reserved for the event's own settings" } end
+    if Store.config.presets[new] then return { new = "a preset with this name exists" } end
+    Store.renamePreset(old, new)
 end
 
 function admin.saveLimits(player, args)
@@ -121,11 +141,40 @@ function admin.saveLootPacks(player, args)
     Store.saveLootPacks(packs)
 end
 
-function admin.generateSchedules(player)
-    local n, why = SEM.Scheduler.generate()
+function admin.generateSchedules(player, args)
+    local c = args.count
+    if type(c) ~= "number" or c ~= math.floor(c) or c < 1 or c > 50 then return { count = "must be a whole number, 1 to 50" } end
+    local n, why = SEM.Scheduler.generate(c)
     if not n then return nil, { text = why, bad = true } end
     SEM.Runner.pushSnapshot()
-    return nil, { text = "Generated " .. n .. " random schedule(s) from your presets" }
+    return nil, { text = "Generated " .. n .. " of " .. c .. " random schedule(s)" .. (why and (", " .. why) or "") }
+end
+
+-- ids are all checked before anything changes: one unknown id rejects the whole request
+function admin.bulkSchedule(player, args)
+    local ids, action = args.ids, args.action
+    if action ~= "enable" and action ~= "disable" and action ~= "delete" then return { action = "must be enable, disable or delete" } end
+    if type(ids) ~= "table" or #ids < 1 then return { ids = "must be a list of schedule ids" } end
+    if #ids > 50 then return { ids = "at most 50 ids" } end
+    local seen = {}
+    for i = 1, #ids do
+        local id = ids[i]
+        if type(id) ~= "string" or not Store.config.schedules[id] then return { ids = "no such schedule" } end
+        if seen[id] then return { ids = "duplicate id" } end
+        seen[id] = true
+    end
+    for i = 1, #ids do
+        local id = ids[i]
+        if action == "delete" then
+            Store.deleteSchedule(id)
+        else
+            local e = Store.config.schedules[id]
+            e.enabled = action == "enable"
+            SEM.Scheduler.touch(Store.saveSchedule(id, e))
+        end
+    end
+    SEM.Runner.pushSnapshot()
+    return nil, { text = #ids .. " schedule(s) " .. action .. "d" }
 end
 
 function admin.savePacks(player, args)
@@ -134,12 +183,42 @@ function admin.savePacks(player, args)
     Store.savePacks(packs)
 end
 
+-- replies to the requester only, never a broadcast
+function admin.getConfig(player)
+    local text, err = SEM.Json.encode(Store.exportConfig())
+    if not text then return nil, { text = "Export failed: " .. tostring(err), bad = true } end
+    sendServerCommand(player, MODULE, "configExport", { text = text })
+    return nil, nil, true
+end
+
+function admin.importConfig(player, args)
+    local function refuse(why)
+        print("[SEM] importConfig refused for " .. name(player) .. ": " .. why)
+        sendServerCommand(player, MODULE, "configError", { text = why })
+        return nil, nil, true
+    end
+    if type(args.text) ~= "string" then return refuse("text: must be the exported text") end
+    if #args.text > MAX_IMPORT then return refuse("text: over 1 MiB") end
+    local tbl, err = SEM.Json.decode(args.text)
+    if tbl == nil then return refuse(err or "text: empty config") end
+    local ok, why = Store.importConfig(tbl)
+    if not ok then return refuse(why) end
+    for id in pairs(Store.config.schedules) do SEM.Scheduler.touch(id) end
+    SEM.Runner.pushSnapshot()
+    print("[SEM] importConfig applied by " .. name(player))
+    return nil, { text = "Config imported" }
+end
+
 function admin.forceEvent(player, args)
     local d, errs = def(args)
     if not d then return errs end
-    local override = args.override
-    if override ~= nil and type(override) ~= "boolean" then return { override = "must be true or false" } end
-    local run, why = SEM.Runner.begin(d.id, "force", nil, nil, override == true)
+    local p, o = args.preset
+    if p ~= nil and p ~= "" and not (type(p) == "string" and isDefault(p)) then -- no preset, or Default: the event's own options
+        local pre = type(p) == "string" and Store.config.presets[p]
+        if not pre or pre.eventId ~= d.id then return { preset = "no such preset for this event" } end
+        o = pre.options
+    end
+    local run, why = SEM.Runner.begin(d.id, "force", o)
     if not run then return nil, { text = d.title .. " not started: " .. why, bad = true } end
 end
 
@@ -153,6 +232,7 @@ local public = {}
 
 function public.hello(player)
     sendServerCommand(player, MODULE, "markerState", { markers = SEM.Runner.markers() })
+    if SEM.isAdmin(player) then sendServerCommand(player, MODULE, "markerExactState", { dots = SEM.Runner.exactDots() }) end
     sendServerCommand(player, MODULE, "superState", SEM.Events.super.marks())
     sendServerCommand(player, MODULE, "eventFeed", { items = SEM.Runner.feed() })
     sendServerCommand(player, MODULE, "eventTags", SEM.Spawn.tagLists())
@@ -175,21 +255,22 @@ local function handle(module, command, player, args)
     if not Store.config then Store.init() end
     if args == nil then args = {} end -- PZ delivers an empty table as nil
     if type(args) ~= "table" then args = nil end
-    local errs, notice, reqId
+    local errs, notice, reqId, quiet
     if args and ACKED[command] and args.reqId ~= nil then
         if validReqId(args.reqId) then reqId = args.reqId else errs = { reqId = "must be text of 1 to 40 characters, or a number" } end
     end
     if errs then
         -- bad reqId: nothing to echo
-    elseif args then errs, notice = fn(player, args) else errs = { _ = "payload must be a table" } end
+    elseif args then errs, notice, quiet = fn(player, args) else errs = { _ = "payload must be a table" } end
     if errs then
         print("[SEM] bad " .. command .. " from " .. name(player))
         sendServerCommand(player, MODULE, "error", { command = command, errors = errs, ack = reqId })
     elseif notice then
         sendServerCommand(player, MODULE, "notice", notice)
+    elseif quiet then -- the command already replied
     else
         SEM.Runner.pushSnapshot(player, reqId)
-        if command == "saveEvent" or command == "saveLimits" or command == "saveSchedule" or command == "saveLootPacks" or command == "savePacks" then
+        if command == "saveEvent" or command == "saveLimits" or command == "saveSchedule" or command == "saveLootPacks" or command == "savePacks" or command == "renamePreset" then
             print("[SEM] " .. command .. " saved by " .. name(player))
             sendServerCommand(player, MODULE, "notice", { text = "Saved" })
         end

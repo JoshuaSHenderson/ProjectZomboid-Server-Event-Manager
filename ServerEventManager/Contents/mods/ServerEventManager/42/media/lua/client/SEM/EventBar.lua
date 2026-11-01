@@ -1,5 +1,5 @@
--- Server Event Manager: the event bar every player sees. Lists incoming, active and recently resolved events by title only, so it
--- gives no location away. The header's button folds it, dragging moves it, and both are kept in the player's modData. Events behind
+-- Server Event Manager: the event bar every player sees. Lists incoming, active and recently resolved events by title, status and
+-- time left, so it gives no location away. The header's button folds it, dragging moves it, and both are kept in the player's modData. Events behind
 -- Require Radio stay off it for a player without one. Multiplayer only, like the rest of the mod.
 if isServer() then return end
 require "ISUI/ISPanel"
@@ -11,9 +11,9 @@ local T = SEM.Theme
 local Bar = ISPanel:derive("SEM_EventBar")
 SEM.EventBar = Bar
 
-local W, HEAD, ROW, RADIO_MS = 240, 22, 20, 2000
-local WORD = { ended = "Ended", cancelled = "Cancelled", failed = "Failed" }
-local items = {} -- { id, title, state, radio, leftUntil (ms), goneAt (ms) }
+local W, MINW, HEAD, ROW, RADIO_MS = 300, 220, 22, 20, 2000 -- W is the default width; HEAD and ROW grow with the font
+local WORD = { ended = "Completed", cancelled = "Cancelled", failed = "Failed" }
+local items = {} -- { id, title, state, status, radio, leftUntil (ms), goneAt (ms) }
 local radioAt, radioYes = 0, false
 
 local function now() return getTimestampMs() end
@@ -39,29 +39,40 @@ local function rows()
 end
 
 local function statusOf(e)
+    if WORD[e.state] then return WORD[e.state], T.c.dim end
+    local word = e.status or (e.state == "pending" and "Pending" or "Active")
     if e.leftUntil then
         local s = math.max(0, math.ceil((e.leftUntil - now()) / 1000))
-        return string.format("In %d:%02d", math.floor(s / 60), s % 60), T.c.hot
+        local clock = string.format("%d:%02d", math.floor(s / 60), s % 60)
+        if word == "Incoming" then return "In " .. clock, T.c.hot end -- the run starts then
+        return word .. " " .. clock, word == "Active" and T.c.red or T.c.hot
     end
-    if WORD[e.state] then return WORD[e.state], T.c.dim end
-    return "Active", T.c.red
+    return word, word == "Active" and T.c.red or T.c.hot
+end
+
+local function metrics()
+    HEAD, ROW = math.max(22, T.fh() + 8), math.max(20, T.fh() + 6)
 end
 
 function Bar:new(x, y)
-    local o = ISPanel.new(self, x, y, W, HEAD)
+    metrics()
+    local sw = getCore():getScreenWidth()
+    local o = ISPanel.new(self, x, y, math.min(sw, math.max(MINW, (T.loadSize("semBar")) or W)), HEAD)
     o.backgroundColor, o.borderColor, o.moveWithMouse = T.c.bg, T.c.line, true
     return o
 end
 
 function Bar:initialise()
     ISPanel.initialise(self)
-    self.fold = T.btn("-", W - 24, 2, 20, self, Bar.onFold)
+    self.fold = T.btn("-", self.width - 24, 2, 20, self, Bar.onFold)
     self:addChild(self.fold)
+    T.grip(self, MINW, 0, true)
     self:setFolded(getPlayer():getModData().semBarFolded == true)
 end
 
 function Bar:setFolded(on)
     self.folded = on
+    self.grip:setVisible(not on) -- folded, the bar is one header high and the grip would sit on the fold button
     self.fold:setTitle(on and "+" or "-")
     getPlayer():getModData().semBarFolded = on
 end
@@ -80,14 +91,19 @@ function Bar:prerender()
     local x, y = math.max(0, math.min(self.x, sw - self.width)), math.max(0, math.min(self.y, sh - self.height))
     if x ~= self.x then self:setX(x) end
     if y ~= self.y then self:setY(y) end
+    metrics()
     self.list = rows()
-    local h = HEAD + (self.folded and 0 or math.max(1, #self.list) * ROW + 4)
+    local h = HEAD + (self.folded and 0 or math.max(1, #self.list) * ROW + 8)
     if h ~= self.height then self:setHeight(h) end
+    if self.fold.x ~= self.width - 24 then self.fold:setX(self.width - 24) end
+    T.placeGrip(self)
+    T.saveSize(self, "semBar")
     ISPanel.prerender(self)
 end
 
 function Bar:render()
     local c, list = T.c, self.list or {}
+    T.drawGrip(self)
     T.text(self, "Server Events" .. (#list > 0 and (" (" .. #list .. ")") or ""), 8, 3, #list > 0 and c.hot or c.amber)
     if self.folded then return end
     if #list == 0 then
@@ -97,8 +113,8 @@ function Bar:render()
     for i, e in ipairs(list) do
         local y = HEAD + 2 + (i - 1) * ROW
         local text, col = statusOf(e)
-        T.text(self, T.fit(tostring(e.title), W - T.tw(text) - 24), 8, y, e.goneAt and c.dim or c.amber)
-        T.textRight(self, text, W - 8, y, col)
+        T.text(self, T.fit(tostring(e.title), self.width - T.tw(text) - 24), 8, y, e.goneAt and c.dim or c.amber)
+        T.textRight(self, text, self.width - 8, y, col)
     end
 end
 
@@ -107,7 +123,7 @@ Events.OnServerCommand.Add(function(module, command, args)
     if module ~= SEM.Config.MODULE or command ~= "eventFeed" then return end
     local t, new = now(), {}
     for _, e in ipairs(type(args) == "table" and args.items or {}) do
-        new[#new + 1] = { id = e.id, title = e.title, state = e.state, radio = e.radio,
+        new[#new + 1] = { id = e.id, title = e.title, state = e.state, status = e.status, radio = e.radio,
             leftUntil = e.left and t + e.left * 1000 or nil,
             goneAt = e.age and t + (SEM.Config.FEED_RECENT - e.age) * 1000 or nil }
     end

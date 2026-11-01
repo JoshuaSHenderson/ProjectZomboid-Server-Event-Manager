@@ -9,15 +9,13 @@ local T = SEM.Theme
 local P = {}
 SEM.PacksPage = P
 
-local TIERS, TIER_NAMES = { "low", "medium", "high" }, { "Low Tier", "Medium Tier", "High Tier" }
+local TIERS, TIER_NAMES = { "low", "medium", "high" }, { "Low", "Medium", "High" }
 local TIER_HELP = "How good this pack counts as. An event set to Random Low, Medium or High Tier picks among the packs with that tier."
 local PICKS_HELP = "Items in each crate. 0 rolls every row by its chance. A number picks that many rows at random for each crate, ignoring chance, so no two crates match."
 
 P.KINDS = {
-    lootPacks = { field = "items", button = "Edit Loot", kind = "loot", cmd = "saveLootPacks", noun = "items", empty = "No packs. Crates fall back to the built-in list.",
-        help = "A loot pack is a named list of items, with a chance and count for each. Press Edit Loot, then Add Random to fill it from the game's items. Choose a pack on each event page." },
-    vehiclePacks = { field = "vehicles", button = "Edit Vehicles", kind = "vehicle", cmd = "savePacks", noun = "vehicles", empty = "No packs yet. Convoy Wreck uses the default cars.",
-        help = "A pack is a named set of vehicles Convoy Wreck can use. Name it, press Edit Vehicles and pick from every vehicle in the game, modded ones included. Choose a pack on the Convoy Wreck page." },
+    lootPacks = { field = "items", button = "Edit Loot", kind = "loot", cmd = "saveLootPacks", noun = "items", empty = "No packs. Crates fall back to the built-in list." },
+    vehiclePacks = { field = "vehicles", button = "Edit Vehicles", kind = "vehicle", cmd = "savePacks", noun = "vehicles", empty = "No packs yet. Convoy Wreck uses the default cars." },
 }
 
 -- the page's draft from the config; empty lists arrive from the server as nil
@@ -54,18 +52,61 @@ local function listText(k, list)
     return table.concat(out, ", ") .. (#list > 6 and ", ..." or "")
 end
 
--- c is the console, f its form, id the page
+local GAP, MARGIN = 6, 18 -- column gap; right margin (scroll bar)
+
+-- c is the console, f its form, id the page. One row per pack; columns follow the view width.
 function P.build(c, f, d, y, id)
     local k = P.KINDS[id]
-    f:help(k.help, 12, y)
-    y = y + 26
-    if #d.packs == 0 then
-        table.insert(f.marks, { k.empty, 12, y, T.c.dim })
-        y = y + 24
+    local loot = k.kind == "loot"
+    local fh, bh = T.fh(), T.bh()
+    local rh = fh + 12
+    local vw = f.view:getWidth()
+    local function btnW(s) return T.tw(s) + 16 end
+    local cols = {}
+    if loot then
+        cols = { { "tier", T.tw("Medium") + 36 }, { "per", T.tw("Per Crate") + 4 }, { "cnt", T.tw("Items") + 8 } }
+    else
+        cols = { { "cnt", T.tw("Vehicles") + 8 } }
+    end
+    cols[#cols + 1] = { "edit", btnW("Edit") }
+    cols[#cols + 1] = { "del", btnW("Delete") }
+    local fixed = 0
+    for _, col in ipairs(cols) do fixed = fixed + col[2] + GAP end
+    local avail = vw - 12 - MARGIN
+    local nameW = math.max(80, math.min(200, avail - fixed))
+    local X, W, x = { name = 12 }, { name = nameW }, 12 + nameW + GAP
+    for _, col in ipairs(cols) do X[col[1]], W[col[1]] = x, col[2]; x = x + col[2] + GAP end
+    local pw = 12 + avail - x -- what is left on the right is the preview column, only when it is wide enough
+    local preview = pw >= 120 and x or nil
+
+    local hy = y
+    f:hlabel("Name", X.name, hy, T.c.dim)
+    if loot then
+        f:hlabel("Tier", X.tier, hy, T.c.dim, TIER_HELP)
+        f:hlabel("Per Crate", X.per, hy, T.c.dim, PICKS_HELP)
+        f:hlabel("Items", X.cnt, hy, T.c.dim)
+    else
+        f:hlabel("Vehicles", X.cnt, hy, T.c.dim)
+    end
+    f:hlabel("Edit", X.edit, hy, T.c.dim)
+    f:hlabel("Delete", X.del, hy, T.c.dim)
+    if preview then f:hlabel("Preview", preview, hy, T.c.dim) end
+    y = y + fh + 6
+    local top = y
+    local n = #d.packs
+    if n == 0 then
+        table.insert(f.marks, { k.empty, 12, y + 4, T.c.dim })
+        y = y + rh
     end
     for i, p in ipairs(d.packs) do
-        f:entry("pack" .. i, 12, y, 170, p.name, function(t) p.name = t; f.onChange(false) end)
-        f:button(k.button, 188, y, 100, function()
+        local ey, ty = y + math.floor((rh - bh) / 2), y + math.floor((rh - fh) / 2)
+        f:entry("pack" .. i, X.name, ey, W.name, p.name, function(t) p.name = t; f.onChange(false) end)
+        if loot then
+            f:combo("tier" .. i, X.tier, ey, W.tier, TIERS, p.tier, function(v) p.tier = v; f.onChange(false) end, TIER_NAMES)
+            f:entry("pack" .. i, X.per, ey, math.min(W.per, 40), p.picks or 0, function(t) p.picks = tonumber(t) or t; f.onChange(false) end)
+        end
+        table.insert(f.marks, { tostring(#p[k.field]), X.cnt, ty, T.c.amber })
+        f:button("Edit", X.edit, ey, W.edit, function()
             SEM.LootPicker.open(p.name, p[k.field], function(rows)
                 -- a snapshot may have replaced the draft while the picker was open; apply to the current one
                 local cur = c.drafts[id].packs[i]
@@ -73,30 +114,37 @@ function P.build(c, f, d, y, id)
                 f.onChange(true)
             end, k.kind)
         end)
-        f:button("X", 294, y, 24, function() table.remove(d.packs, i); f.onChange(true) end)
-        if k.kind == "loot" then
-            f:combo("tier" .. i, 324, y, 100, TIERS, p.tier, function(v) p.tier = v; f.onChange(false) end, TIER_NAMES)
-            f:help(TIER_HELP, 428, y)
-            table.insert(f.marks, { "Per crate", 450, y + 3 })
-            f:entry("pack" .. i, 508, y, 36, p.picks or 0, function(t) p.picks = tonumber(t) or t; f.onChange(false) end)
-            f:help(PICKS_HELP, 548, y)
+        f:button("Delete", X.del, ey, W.del, function()
+            c:ask("Delete pack " .. tostring(p.name) .. "?", function()
+                local cur = c.drafts[id]
+                if cur and cur.packs[i] then table.remove(cur.packs, i); f.onChange(true) end
+            end)
+        end)
+        if preview and #p[k.field] > 0 then
+            table.insert(f.marks, { T.fit(listText(k, p[k.field]), pw), preview, ty, T.c.dim })
         end
-        y = y + 26
-        if #p[k.field] > 0 then
-            table.insert(f.marks, { T.fit(#p[k.field] .. " " .. k.noun .. ": " .. listText(k, p[k.field]), f.view:getWidth() - 50), 20, y, T.c.dim })
-            y = y + T.fh() + 6
-        end
+        y = y + rh
     end
-    if #d.packs < SEM.Config.MAX_PACKS then
+    -- header rule and alternate row shading, drawn behind the controls
+    local base = f.draw
+    f.draw = function(self)
+        for i = 1, n do
+            if i % 2 == 0 then T.rect(f.view, 8, top + (i - 1) * rh, vw - 28, rh, T.c.line, 0.18) end
+        end
+        T.rect(f.view, 8, top - 3, vw - 28, 1, T.c.line)
+        base(self)
+    end
+    y = y + 8
+    if n < SEM.Config.MAX_PACKS then
         f:button("Add Pack", 12, y, 80, function()
-            local p = { name = "Pack " .. (#d.packs + 1) }
+            local p = { name = "Pack " .. (n + 1) }
             p[k.field] = {}
-            if k.kind == "loot" then p.picks, p.tier = 0, "medium" end
+            if loot then p.picks, p.tier = 0, "medium" end
             d.packs[#d.packs + 1] = p
             f.onChange(true)
         end)
     end
-    return y + 30
+    return y + bh + 12
 end
 
 return P

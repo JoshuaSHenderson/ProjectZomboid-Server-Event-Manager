@@ -1,6 +1,8 @@
 -- Server Event Manager: console colours, fonts, drawing helpers and the translation hook.
 if isServer() then return end
 require "ISUI/ISPanel"
+require "ISUI/ISResizeWidget"
+require "ISUI/ISModalDialog"
 SEM = SEM or {}
 
 local function col(r, g, b, a) return { r = r, g = g, b = b, a = a or 1 } end
@@ -23,6 +25,8 @@ function SEM.t(key, fallback)
 end
 
 function Theme.fh(font) return getTextManager():getFontHeight(font or Theme.font.small) end
+-- button and entry-box height: 22 at the default font, taller when the font needs it
+function Theme.bh() return math.max(22, Theme.fh() + 6) end
 function Theme.tw(str, font) return getTextManager():MeasureStringX(font or Theme.font.small, str) end
 
 function Theme.rect(el, x, y, w, h, c, a) el:drawRect(x, y, w, h, a or c.a, c.r, c.g, c.b) end
@@ -48,6 +52,21 @@ function Theme.fit(str, maxW)
     end
     fitCache[k] = out
     return out
+end
+
+-- str broken into lines no wider than maxW pixels (a single longer word keeps its own line)
+function Theme.wrap(str, maxW)
+    local lines, line = {}, ""
+    for word in tostring(str):gmatch("%S+") do
+        local try = line == "" and word or (line .. " " .. word)
+        if line ~= "" and Theme.tw(try) > maxW then
+            lines[#lines + 1], line = line, word
+        else
+            line = try
+        end
+    end
+    if line ~= "" then lines[#lines + 1] = line end
+    return lines
 end
 
 function Theme.panel(el, x, y, w, h)
@@ -77,6 +96,18 @@ function Theme.input(e, bad)
     e.backgroundColor = bad and Theme.c.redDark or col(0, 0, 0, 0.8)
 end
 
+-- vanilla Yes/No popup centred on the screen, above the console; onYes runs only on Yes
+function Theme.confirm(text, onYes)
+    local sw, sh = getCore():getScreenWidth(), getCore():getScreenHeight()
+    local w, h = ISModalDialog.CalcSize(300, 120, text)
+    local m = ISModalDialog:new((sw - w) / 2, (sh - h) / 2, w, h, text, true, nil, function(_, b)
+        if b.internal == "YES" then onYes() end
+    end)
+    m:initialise()
+    m:addToUIManager()
+    m:bringToTop()
+end
+
 -- vertical scroll area; set .draw(self) for custom content, children scroll with it
 function Theme.scroller(x, y, w, h)
     local p = ISPanel:new(x, y, w, h)
@@ -104,7 +135,7 @@ function Theme.scroller(x, y, w, h)
 end
 
 function Theme.btn(label, x, y, w, target, fn, arg)
-    local b = ISButton:new(x, y, w, 22, label, target, fn)
+    local b = ISButton:new(x, y, math.max(w, Theme.tw(label) + 16), Theme.bh(), label, target, fn)
     b:initialise()
     b:instantiate()
     b.arg = arg
@@ -112,4 +143,56 @@ function Theme.btn(label, x, y, w, target, fn, arg)
     return b
 end
 
+-- vanilla corner grip on any ISPanel. minimumWidth/Height are read by ISResizeWidget:resize; the maximum
+-- is the screen edge from the window's own position, so growing never pushes the window off screen.
+-- widthOnly keeps the height as it is (the Server Events bar sizes its own height).
+function Theme.grip(win, minW, minH, widthOnly)
+    local s = 16
+    local sw, sh = getCore():getScreenWidth(), getCore():getScreenHeight()
+    win.minimumWidth, win.minimumHeight = math.min(minW, sw), widthOnly and 0 or math.min(minH, sh)
+    local g = ISResizeWidget:new(win.width - s, win.height - s, s, s, win)
+    g.widthOnly = widthOnly
+    g.resizeFunction = function(t, w, h)
+        local cw, ch = getCore():getScreenWidth(), getCore():getScreenHeight()
+        t:setWidth(math.min(w, math.max(t.minimumWidth, cw - t.x)))
+        if not widthOnly then t:setHeight(math.min(h, math.max(t.minimumHeight, ch - t.y))) end
+    end
+    g:initialise()
+    win:addChild(g)
+    win.grip = g
+    return g
+end
+
+function Theme.placeGrip(win)
+    local g = win.grip
+    if g then g:setX(win.width - g.width); g:setY(win.height - g.height) end
+end
+
+-- the three-dot-staircase mark in the window's bottom-right corner
+function Theme.drawGrip(win)
+    local g = win.grip
+    if not g or not g:getIsVisible() then return end
+    local c = (g.resizing or g.mouseOver) and Theme.c.hot or Theme.c.dim
+    for a = 0, 2 do
+        for b = 0, 2 - a do Theme.rect(win, win.width - 4 - a * 4, win.height - 4 - b * 4, 2, 2, c) end
+    end
+end
+
+-- per-player window size, kept in player modData beside the bar position
+function Theme.loadSize(key)
+    local p = getPlayer()
+    local m = p and p:getModData()
+    if not m then return nil end
+    return tonumber(m[key .. "W"]), tonumber(m[key .. "H"])
+end
+
+function Theme.saveSize(win, key)
+    local g, p = win.grip, getPlayer()
+    if (g and g.resizing) or not p then return end
+    local m = p:getModData()
+    m[key .. "W"] = win.width
+    if not (g and g.widthOnly) then m[key .. "H"] = win.height end
+end
+
 return Theme
+

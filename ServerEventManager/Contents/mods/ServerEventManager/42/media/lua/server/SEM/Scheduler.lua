@@ -82,22 +82,28 @@ local function resolveOptions(entry)
     return p.options
 end
 
--- preset first, then the shared conditions (players, free event slot, cooldown since world.lastFired[id])
+-- preset first, then the shared conditions (players, cooldown since world.lastFired[id]); a full slot queues instead (Scheduler.fire)
 function Scheduler.check(entry)
     local o, why = resolveOptions(entry)
     if o == nil then return false, why end
     return SEM.Conditions.check(entry.conditions, {
-        onlinePlayers = #SEM.Targets.players(), activeRuns = Runner.liveCount(),
-        maxConcurrent = Store.config.limits.maxConcurrent, nowMs = Scheduler.nowMs(),
+        onlinePlayers = #SEM.Targets.players(), nowMs = Scheduler.nowMs(),
         lastFiredMs = Store.world.lastFired[entry.id],
     })
 end
 
--- starts the entry now, no condition checks. Returns the run, or nil and why
-function Scheduler.fire(entry)
+-- starts the entry now, no condition checks. Returns the run, or nil and why. With the slots full it joins the queue instead
+-- and returns "queued", as it does while others wait, so nothing jumps the line. promoted = the queue itself is starting it.
+-- forced (Run Now) always starts and is not counted.
+function Scheduler.fire(entry, forced, promoted)
     local o, why = resolveOptions(entry)
     if o == nil then return nil, why end
-    local run, err = Runner.begin(entry.eventId, "schedule", o or nil, entry.name)
+    if not forced and not promoted and (#Store.world.queue > 0 or Runner.liveCount() >= Store.config.limits.maxConcurrent) then
+        local ok, err = Runner.enqueue(entry, (o or Store.config.events[entry.eventId].options).title)
+        if not ok then return nil, err end
+        return "queued"
+    end
+    local run, err = Runner.begin(entry.eventId, "schedule", o or nil, entry.name, forced)
     if not run then return nil, err end
     Store.world.lastFired[entry.id] = Scheduler.nowMs()
     return run
@@ -177,7 +183,7 @@ function Scheduler.realTick()
                 if a.type == "fire" then
                     local run, why = Scheduler.fire(entry)
                     if run then
-                        dirty = put(entry, "last", "fired " .. stamp(now)) or dirty
+                        dirty = put(entry, "last", (run == "queued" and "queued " or "fired ") .. stamp(now)) or dirty
                     else -- Runner.begin logged its own failure; the window is spent
                         world.windows[a.key].state, world.windows[a.key].lastReason = "skipped", why
                         dirty = put(entry, "last", "skipped " .. stamp(now)) or dirty
@@ -216,12 +222,22 @@ end
 
 -- ---- Game time ----
 
+-- the game day the Scheduler page shows, counted from 1, or nil
+function Scheduler.gameDay()
+    local hours = Scheduler.worldHours()
+    return hours and math.floor(hours / 24) + 1 or nil
+end
+
+local lastDay
+
 -- EveryTenMinutes. Game time does not advance while the server is down, so a slot is never "missed".
 function Scheduler.gameTick()
     if not ready() then return end
     local hours = Scheduler.worldHours()
     if not hours then return end
     local world, dirty = Store.world, false
+    local day = Scheduler.gameDay()
+    if day ~= lastDay then lastDay, dirty = day, lastDay ~= nil end
     for _, entry in ipairs(entries()) do
         local sc = entry.schedule
         if entry.enabled and isGame(entry) then
@@ -235,7 +251,7 @@ function Scheduler.gameTick()
                     local ok, why = Scheduler.check(entry)
                     if ok then
                         local run = Scheduler.fire(entry) -- a refusal is already in the log, from Runner.begin
-                        dirty = put(entry, "last", (run and "fired " or "skipped ") .. label) or dirty
+                        dirty = put(entry, "last", (run == "queued" and "queued " or run and "fired " or "skipped ") .. label) or dirty
                     else -- one failed condition skips this slot, logged once
                         Runner.logSkip(entry.eventId, entry.name, why)
                         dirty = put(entry, "last", "skipped " .. label) or dirty
@@ -249,12 +265,12 @@ function Scheduler.gameTick()
     if dirty then pushSnapshot() end
 end
 
--- runSchedule: now, ignoring timing, enabled and cooldown (Runner still enforces the event limit)
+-- runSchedule: now, ignoring timing, enabled, cooldown and the event limit (a forced run is not counted)
 function Scheduler.runNow(id)
     if not ready() then return nil, "not ready" end
     local entry = Store.config.schedules[id]
     if not entry then return nil, "no such schedule" end
-    local run, why = Scheduler.fire(entry)
+    local run, why = Scheduler.fire(entry, true)
     if not run then return nil, why end
     local now = Scheduler.clock()
     put(entry, "last", "fired " .. (now and stamp(now) or "now") .. " (manual)")
@@ -264,7 +280,7 @@ end
 
 -- ---- Generate Random ----
 
-Scheduler.AUTO = "Auto: " -- generated entries are named this, so a new run can replace them
+Scheduler.AUTO = "Auto: " -- generated entries are named this
 
 -- Pure. A random Random Game Time schedule; rng(n) gives 1..n. Waits of 1 to 3 days at least, up to 4 days more, first run in 1 to 3 days
 function Scheduler.randomTiming(rng)
@@ -272,28 +288,47 @@ function Scheduler.randomTiming(rng)
     return { mode = "randomGame", minDays = lo, maxDays = lo + rng(4), firstDelayDays = rng(3), quietStart = 0, quietEnd = 0, everyDays = 7, atHour = 20, windows = {} }
 end
 
--- Replaces every earlier generated entry with one Random Game Time entry per saved preset. Entries an admin made stay.
--- Returns the count, or nil and why
-function Scheduler.generate()
+-- Adds count Random Game Time entries, cycling through the saved presets in a shuffled order so each is used
+-- before any repeats. Never touches an existing entry. Names stay unique: "Auto: <preset>", then " 2", " 3".
+-- Returns made, and why it stopped early (nil when all were made); or nil and why when none could be
+function Scheduler.generate(count)
     if not ready() then return nil, "not ready" end
     local names = {}
     for n in pairs(Store.config.presets) do names[#names + 1] = n end
     if #names == 0 then return nil, "Save a preset on an event page first" end
     table.sort(names)
-    local prefix, old = Scheduler.AUTO, {}
-    for id, e in pairs(Store.config.schedules) do if e.name:sub(1, #prefix) == prefix then old[#old + 1] = id end end
-    for _, id in ipairs(old) do Store.deleteSchedule(id) end
-    local made = 0
-    for _, n in ipairs(names) do
-        if Store.scheduleCount() >= Store.MAX_SCHEDULES then break end
-        local ok, entry = Store.validateEntry({ name = (prefix .. n):sub(1, 40), eventId = Store.config.presets[n].eventId, preset = n, enabled = true,
+    local used = {}
+    for _, e in pairs(Store.config.schedules) do used[e.name] = true end
+    local made, at, why = 0, #names
+    for _ = 1, count do
+        if Store.scheduleCount() >= Store.MAX_SCHEDULES then
+            why = "stopped at the " .. Store.MAX_SCHEDULES .. " schedule limit"
+            break
+        end
+        if at >= #names then -- a fresh shuffle once every preset has had a turn
+            for i = #names, 2, -1 do
+                local j = Scheduler.rng(i)
+                names[i], names[j] = names[j], names[i]
+            end
+            at = 0
+        end
+        at = at + 1
+        local n, k, name = names[at], 1, nil
+        repeat
+            local suffix = k == 1 and "" or (" " .. k)
+            name = (Scheduler.AUTO .. n):sub(1, 40 - #suffix) .. suffix
+            k = k + 1
+        until not used[name]
+        local ok, entry = Store.validateEntry({ name = name, eventId = Store.config.presets[n].eventId, preset = n, enabled = true,
             schedule = Scheduler.randomTiming(Scheduler.rng), conditions = SEM.Conditions.defaults() })
         if ok then
+            used[name] = true
             Scheduler.touch(Store.saveSchedule(nil, entry))
             made = made + 1
         end
     end
-    return made
+    if made == 0 and why then return nil, "At most " .. Store.MAX_SCHEDULES .. " schedules" end
+    return made, why
 end
 
 function Scheduler.init()

@@ -20,9 +20,6 @@ function Conditions.check(c, ctx)
     if ctx.onlinePlayers < c.minPlayers then
         return false, ctx.onlinePlayers .. "/" .. c.minPlayers .. " players"
     end
-    if ctx.activeRuns >= ctx.maxConcurrent then
-        return false, ctx.activeRuns .. "/" .. ctx.maxConcurrent .. " events running"
-    end
     if c.cooldownMinutes > 0 and ctx.lastFiredMs then
         local left = c.cooldownMinutes * 60000 - (ctx.nowMs - ctx.lastFiredMs)
         if left > 0 then return false, "cooldown " .. math.ceil(left / 60000) .. " min" end

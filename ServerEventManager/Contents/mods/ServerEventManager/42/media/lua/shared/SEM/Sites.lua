@@ -4,7 +4,8 @@ SEM = SEM or {}
 local Sites = {}
 SEM.Sites = Sites
 
--- zone type names per class; first class in ORDER that matches wins
+-- zone type names per class; first class in ORDER that matches wins. A dedicated server has no town, forest or farm zones (spike S7),
+-- so there only road ever matches and the rest reads as field; Spawn.clearSite handles forest
 -- ponytail: Vegitation (vanilla spelling) counts as field until tuned on real samples
 Sites.ZONES = {
     town = { TownZone = true, TrailerPark = true },

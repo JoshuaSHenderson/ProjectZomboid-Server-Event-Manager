@@ -17,7 +17,7 @@ Store.limitsSchema = {
     { key = "maxZombiesPerEvent", type = "int", min = 1, max = 500, default = C.MAX_ZOMBIES_PER_EVENT,
       help = "Most zombies any single event may spawn, whatever its own settings say. 200 is safe for most servers." },
     { key = "maxConcurrent", type = "int", min = 1, max = 5, default = C.MAX_CONCURRENT,
-      help = "How many events may run at once. 2 keeps the server calm; more adds load." },
+      help = "How many scheduled events may run at once; more wait in a queue. Forced events are not counted. 2 keeps the server calm; more adds load." },
 }
 
 local scheduleSchema = {
@@ -200,8 +200,34 @@ local function normSchedules(raw)
     return out
 end
 
+-- one step per schema bump, each run on a config saved before it (no schema means 1). Schema 2: Convoy lost its "none" guard type.
+-- Schema 3: lootPack and vehiclePack hold a list of pack names, "" becomes empty.
+function Store.migrate(cfg)
+    local from = cfg.schema or 1
+    local function each(fix)
+        for id, e in pairs(tbl(cfg.events)) do fix(tbl(e).options, id) end
+        for _, p in pairs(tbl(cfg.presets)) do
+            if type(p) == "table" then fix(p.options, p.eventId) end
+        end
+    end
+    if from < 2 then
+        each(function(o, id)
+            if type(o) == "table" and o.guardType == "none" and id == "convoy" then o.guardType = "zombies" end
+        end)
+    end
+    if from < 3 then
+        each(function(o)
+            if type(o) ~= "table" then return end
+            for _, k in ipairs({ "lootPack", "vehiclePack" }) do
+                if type(o[k]) == "string" then o[k] = o[k] == "" and {} or { o[k] } end
+            end
+        end)
+    end
+end
+
 local function normConfig(raw)
     raw = tbl(raw)
+    Store.migrate(raw)
     local _, packs = Store.validatePacks(raw.vehiclePacks)
     local _, loot = Store.validatePacks(raw.lootPacks, true)
     packs, loot = packs or {}, loot or {}
@@ -209,7 +235,7 @@ local function normConfig(raw)
         seed(packs, C.VEHICLE_PACKS)
         seed(loot, C.LOOT_PACKS)
     end
-    local cfg = { version = C.VERSION, limits = cleanFields(Store.limitsSchema, raw.limits), events = {}, presets = {},
+    local cfg = { version = C.VERSION, schema = C.SCHEMA, limits = cleanFields(Store.limitsSchema, raw.limits), events = {}, presets = {},
         lootPacks = loot, vehiclePacks = packs, packsSeeded = true,
         schedules = normSchedules(raw.schedules), nextScheduleId = type(raw.nextScheduleId) == "number" and raw.nextScheduleId or 1 }
     for id in pairs(cfg.schedules) do -- never reissue an id that is in use
@@ -235,7 +261,7 @@ local function normWorld(raw)
     return {
         nextRunId = type(raw.nextRunId) == "number" and raw.nextRunId or 1,
         runs = tbl(raw.runs), history = tbl(raw.history), windows = tbl(raw.windows),
-        lastFired = tbl(raw.lastFired), nextGameHour = tbl(raw.nextGameHour), sweeps = tbl(raw.sweeps),
+        lastFired = tbl(raw.lastFired), nextGameHour = tbl(raw.nextGameHour), sweeps = tbl(raw.sweeps), queue = tbl(raw.queue),
     }
 end
 
@@ -259,8 +285,8 @@ local function serverClock()
 end
 
 function Store.snapshot()
-    return { config = copy(Store.config), runs = copy(Store.world.runs), history = copy(Store.world.history),
-        serverClock = serverClock(), bases = SEM.Targets and SEM.Targets.bases() or nil }
+    return { config = copy(Store.config), runs = copy(Store.world.runs), history = copy(Store.world.history), queue = copy(Store.world.queue),
+        serverClock = serverClock(), bases = SEM.Targets and SEM.Targets.bases() or nil, gameDay = SEM.Scheduler and SEM.Scheduler.gameDay() }
 end
 
 -- the setters below take input already validated by Server
@@ -291,6 +317,9 @@ end
 function Store.deleteSchedule(id)
     Store.config.schedules[id] = nil
     local w = Store.world
+    for i = #w.queue, 1, -1 do -- an import reuses ids, so a waiting entry must not outlive its schedule
+        if w.queue[i].scheduleId == id then table.remove(w.queue, i) end
+    end
     w.lastFired[id], w.nextGameHour[id] = nil, nil
     local prefix = id .. ":"
     for key in pairs(w.windows) do
@@ -304,6 +333,14 @@ end
 
 function Store.deletePreset(name) Store.config.presets[name] = nil end
 
+-- schedules that run the preset follow it to the new name
+function Store.renamePreset(old, new)
+    Store.config.presets[new], Store.config.presets[old] = Store.config.presets[old], nil
+    for _, e in pairs(Store.config.schedules) do
+        if e.preset == old then e.preset = new end
+    end
+end
+
 function Store.saveLimits(limits) Store.config.limits = limits end
 
 function Store.saveLootPacks(packs) Store.config.lootPacks = packs end
@@ -314,6 +351,147 @@ function Store.presetCount()
     local n = 0
     for _ in pairs(Store.config.presets) do n = n + 1 end
     return n
+end
+
+-- ---- export / import (D48) ----
+
+local EXPORT_KEYS = { schema = true, limits = true, events = true, presets = true, schedules = true, lootPacks = true, vehiclePacks = true }
+local ENTRY_KEYS = { name = true, eventId = true, preset = true, enabled = true, schedule = true, conditions = true }
+
+-- the saved config minus live state (next/last times, ids inside entries, the seeding flag)
+function Store.exportConfig()
+    local c = copy(Store.config)
+    for _, e in pairs(c.schedules) do e.id, e.next, e.last = nil, nil, nil end
+    return { schema = C.SCHEMA, limits = c.limits, events = c.events, presets = c.presets, schedules = c.schedules,
+        lootPacks = c.lootPacks, vehiclePacks = c.vehiclePacks }
+end
+
+local function firstKey(errs)
+    local ks = {}
+    for k in pairs(errs) do ks[#ks + 1] = tostring(k) end
+    table.sort(ks)
+    return ks[1], errs[ks[1]] or errs[tonumber(ks[1])]
+end
+
+local function isList(t)
+    local n = 0
+    for _ in pairs(t) do n = n + 1 end
+    return n == #t
+end
+
+-- Validates raw (untrusted, decoded JSON) in full and returns the new config, or nil and the first error.
+-- Nothing live is touched; Store.importConfig swaps the result in.
+function Store.buildConfig(raw)
+    if type(raw) ~= "table" then return nil, "config: must be an object" end
+    raw = copy(raw)
+    for k in pairs(raw) do
+        if not EXPORT_KEYS[k] then return nil, "config." .. tostring(k) .. ": unknown section" end
+    end
+    for k in pairs(EXPORT_KEYS) do -- a half-pasted config must never wipe the rest
+        if k ~= "schema" and raw[k] == nil then return nil, "config." .. k .. ": section is missing" end
+    end
+    if raw.schema ~= nil and not (type(raw.schema) == "number" and raw.schema >= 1 and raw.schema <= C.SCHEMA) then
+        return nil, "schema: must be a number from 1 to " .. C.SCHEMA .. " (this export may come from a newer mod)"
+    end
+    Store.migrate(raw)
+    local cfg = { version = C.VERSION, schema = C.SCHEMA, events = {}, presets = {}, packsSeeded = true, schedules = {}, nextScheduleId = 1 }
+
+    local lim = raw.limits == nil and {} or raw.limits
+    local ok, clean, errs = O.validate(Store.limitsSchema, lim)
+    if not ok then local k, m = firstKey(errs) return nil, "limits." .. k .. ": " .. tostring(m) end
+    cfg.limits = clean
+
+    local evs = raw.events == nil and {} or raw.events
+    if type(evs) ~= "table" then return nil, "events: must be an object" end
+    for id, e in pairs(evs) do
+        if type(id) ~= "string" or not SEM.EventDefs.byId[id] then return nil, "events." .. tostring(id) .. ": unknown event" end
+        if type(e) ~= "table" then return nil, "events." .. id .. ": must be an object" end
+        for k in pairs(e) do if k ~= "options" then return nil, "events." .. id .. "." .. tostring(k) .. ": unknown key" end end
+    end
+    for _, def in ipairs(SEM.EventDefs) do
+        local e = evs[def.id]
+        ok, clean, errs = O.validate(def.options, tbl(e).options == nil and {} or e.options)
+        if not ok then local k, m = firstKey(errs) return nil, "events." .. def.id .. ".options." .. k .. ": " .. tostring(m) end
+        cfg.events[def.id] = { options = clean }
+    end
+
+    local pre = raw.presets == nil and {} or raw.presets
+    if type(pre) ~= "table" then return nil, "presets: must be an object" end
+    local n = 0
+    for name, p in pairs(pre) do
+        n = n + 1
+        if n > Store.MAX_PRESETS then return nil, "presets: at most " .. Store.MAX_PRESETS .. " presets" end
+        if not validName(name) then return nil, "presets." .. tostring(name) .. ": name must be 1 to 40 characters" end
+        if name:lower() == "default" then return nil, "presets." .. name .. ": Default is reserved for the event's own settings" end
+        if type(p) ~= "table" then return nil, "presets." .. name .. ": must be an object" end
+        for k in pairs(p) do
+            if k ~= "eventId" and k ~= "options" then return nil, "presets." .. name .. "." .. tostring(k) .. ": unknown key" end
+        end
+        local def = type(p.eventId) == "string" and SEM.EventDefs.byId[p.eventId]
+        if not def then return nil, "presets." .. name .. ".eventId: unknown event" end
+        ok, clean, errs = O.validate(def.options, p.options == nil and {} or p.options)
+        if not ok then local k, m = firstKey(errs) return nil, "presets." .. name .. ".options." .. k .. ": " .. tostring(m) end
+        cfg.presets[name] = { eventId = def.id, options = clean }
+    end
+
+    for _, sec in ipairs({ { "vehiclePacks", false }, { "lootPacks", true } }) do
+        local v = raw[sec[1]]
+        if v ~= nil and (type(v) ~= "table" or not isList(v)) then return nil, sec[1] .. ": must be a list" end
+        local pok, packs, perrs = Store.validatePacks(v, sec[2])
+        if not pok then local k, m = firstKey(perrs) return nil, sec[1] .. "." .. k .. ": " .. tostring(m) end
+        cfg[sec[1]] = packs
+    end
+
+    local sch = raw.schedules == nil and {} or raw.schedules
+    if type(sch) ~= "table" then return nil, "schedules: must be an object" end
+    local names = {}
+    n = 0
+    local ids = {}
+    for id in pairs(sch) do ids[#ids + 1] = tostring(id) end
+    table.sort(ids)
+    for _, id in ipairs(ids) do
+        local e = sch[id]
+        n = n + 1
+        if n > Store.MAX_SCHEDULES then return nil, "schedules: at most " .. Store.MAX_SCHEDULES .. " schedules" end
+        local num = id:match("^s(%d+)$")
+        if not num or #num > 9 then return nil, "schedules." .. id .. ": id must look like s1" end
+        if type(e) ~= "table" then return nil, "schedules." .. id .. ": must be an object" end
+        for k in pairs(e) do
+            if not ENTRY_KEYS[k] then return nil, "schedules." .. id .. "." .. tostring(k) .. ": unknown key" end
+        end
+        -- JSON object keys are text; window days are numbers
+        if type(e.schedule) == "table" and type(e.schedule.windows) == "table" then
+            for _, w in pairs(e.schedule.windows) do
+                if type(w) == "table" and type(w.days) == "table" then
+                    local days = {}
+                    for dow, on in pairs(w.days) do days[tonumber(dow) or dow] = on end
+                    w.days = days
+                end
+            end
+        end
+        local eok, entry, eerrs = Store.validateEntry(e, id)
+        if not eok then local k, m = firstKey(eerrs) return nil, "schedules." .. id .. "." .. k .. ": " .. tostring(m) end
+        if names[entry.name] then return nil, "schedules." .. id .. ".name: another schedule already has this name" end
+        names[entry.name] = true
+        if entry.preset ~= "" then
+            local p = cfg.presets[entry.preset]
+            if not p then return nil, "schedules." .. id .. ".preset: no such preset" end
+            if p.eventId ~= entry.eventId then return nil, "schedules." .. id .. ".preset: belongs to another event" end
+        end
+        cfg.schedules[id] = entry
+        if tonumber(num) >= cfg.nextScheduleId then cfg.nextScheduleId = tonumber(num) + 1 end
+    end
+    return cfg
+end
+
+-- All or nothing. Returns true, or false and the first error
+function Store.importConfig(raw)
+    local cfg, err = Store.buildConfig(raw)
+    if not cfg then return false, err end
+    for id in pairs(copy(Store.config.schedules)) do Store.deleteSchedule(id) end -- forget their world state
+    for id in pairs(cfg.schedules) do Store.deleteSchedule(id) end -- ids may be reused for different entries
+    replace(Store.config, cfg)
+    return true
 end
 
 Events.OnInitGlobalModData.Add(Store.init)

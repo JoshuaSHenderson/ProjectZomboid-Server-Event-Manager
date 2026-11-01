@@ -54,7 +54,7 @@ end
 local function eachCamp(fn)
     if not (SEM.Store and SEM.Store.world) then return end
     for _, run in pairs(SEM.Store.world.runs) do
-        if type(run) == "table" and (run.eventId == "camp" or run.eventId == "siege" or run.eventId == "hunted" or run.eventId == "stranger") and run.state == "active" and type(run.data) == "table" and run.data.want then fn(run) end
+        if type(run) == "table" and run.state == "active" and type(run.data) == "table" and run.data.want then fn(run) end
     end
 end
 
@@ -109,6 +109,7 @@ end
 
 local function place(run, o)
     local d = run.data
+    Spawn.clearSite(run, o)
     local sq = Spawn.findSquare(run.x, run.y, 15, o)
     if not sq then return SEM.Runner.fail(run, "no valid ground near the target") end
     local x, y, z = sq:getX(), sq:getY(), sq:getZ()

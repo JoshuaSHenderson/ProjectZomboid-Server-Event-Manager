@@ -3,21 +3,23 @@
 Project Zomboid Build 42 mod for multiplayer servers. It gives server admins an in-game console to set up,
 force, schedule and cancel server events: airdrops, hostile camps, migrating hordes, wildfires, super zombies, convoy
 wrecks, sieges, manhunts and rescue calls. Players get on-screen alerts, a sound and map markers. Mod id
-`ServerEventManager`, author JoshuaSHenderson, version 0.1.0-beta.
+`ServerEventManager`, author JoshuaSHenderson, version 0.2.0-beta.
 
 > **Beta, under active development. Expect bugs.** If you hit one, please
 > [open an issue](https://github.com/JoshuaSHenderson/ProjectZomboid-Server-Event-Manager/issues) with what you did and your `console.txt`.
 
+Steam Workshop: https://steamcommunity.com/sharedfiles/filedetails/?id=3830652321
+
 ## Screenshots
 
-![Event options: every setting has a hover blurb](docs/screenshots/event-options.png)
+![The console: sectioned menu, one preset page per event, live events and logs](docs/screenshots/event-options.png)
 
-![Scheduler: random entries generated from presets](docs/screenshots/scheduler.png)
+![Server Events bar: what every player sees](docs/screenshots/event-bar.png)
 
 ## Status
 
 Beta. Unit specs and a self-test inside real Project Zomboid Lua pass, and the console and most events have been played on a test
-server. The live-server pass has not happened yet, so large servers and other mod lists are untested.
+server. It has had a first run on a live server, and 0.2.0-beta comes from that list. Large servers and other mod lists are still lightly tested.
 
 ## Requirements
 
@@ -27,12 +29,12 @@ server. The live-server pass has not happened yet, so large servers and other mo
 - Admin access level. The check is exact `admin`, repeated on the server for every command. Moderators and other
   levels cannot open or use the console.
 
-Optional, never required. Without them the mod works and falls back to zombies:
+**Optional dependencies.** The mod runs on its own, but everything with NPCs needs these:
 
-| Mod | Workshop id | Mod id | What it adds |
-| --- | --- | --- | --- |
-| Project A-Life | `3803984183` | `ProjectALifeNPCs` | NPC guards for Airdrop and Convoy, the survivors and tents of Hostile Camp, A-Life homes as Horde targets |
-| Project A-Life - Jeem Extension | `3806944055` | `ProjectALifeJimmy` | Jeem bases: protected from events, and usable as event locations and Horde targets |
+- [Project A-Life](https://steamcommunity.com/sharedfiles/filedetails/?id=3803984183): required for all NPCs: NPC guards, Hostile Camp survivors, Under Siege, Stranger Calls For Help and Hunted. Workshop id `3803984183`, mod id `ProjectALifeNPCs`.
+- [Project A-Life - Jeem Extension](https://steamcommunity.com/sharedfiles/filedetails/?id=3806944055): adds Jeem bases as targets and protected zones, and faction standing for the stranger's reward. Workshop id `3806944055`, mod id `ProjectALifeJimmy`.
+
+Without A-Life, guards and camps use zombies, and those three events refuse to start.
 
 ## Install on a server
 
@@ -61,23 +63,23 @@ logged on the server.
 
 - **Left rail:** the nine events, then **Scheduler**, **Limits**, **Loot Packs** and **Vehicle Packs**. Each event has a status pill: OFF, ON, WARNING
   or LIVE. ON means an enabled schedule entry runs that event. A `*` after a name marks unsaved edits.
-- **Centre, event pages:** two tabs, **Options** and **Presets**. Every option has a `?` with a hover blurb.
-  Invalid fields turn red and block Save. The server validates again on Save.
+- **Centre, event pages:** one screen. Pick a preset (every event has a Default), edit, then **Update**, **Save As**, **Cancel**, **Delete** or **Trigger Now**. Every option has a `?` with a hover blurb.
+  Invalid fields turn red and block saving. The server validates again on save. Confirmations are popups.
 - **Right side:** **Active Events** above **Logs**.
   - Active Events lists each live run with Cancel, a line or two of detail, and **Teleport**, which sends the
     chat command `/teleportto x,y,0` to the run's site.
   - Logs show notices, then history, newest first: fired, ended, cancelled, failed, and schedule skips with a reason.
 - **Header:** the server clock (marked SERVER once the server has sent it). Real-World windows use that clock.
-- **Presets tab:** type a name and press Save As to keep the page's current options. Click a name, then Load puts
-  those options on the page (press Save to keep them) or Delete removes it (press twice). At most 50 presets.
-  A preset belongs to one event.
+- **Presets:** on each event page. **Save As** keeps the page's current options under a new name, **Update** saves
+  edits to the chosen preset, and **Delete** removes it after a popup asks. At most 50 presets. A preset belongs to one event.
 - **Scheduler page:** a table of entries (see [Scheduler](#scheduler)).
 - **Limits page:** Max Zombies Per Event (1 to 500, default 200) and Max Concurrent Events (1 to 5, default 2).
-- **Force Now:** two steps. The first click arms the button and shows the event and where it will happen (for example
-  `Confirm Airdrop: Town Muldraugh?`). Click again within 5 seconds to start. Force Now runs the **saved** options, not
-  unsaved edits. It skips the schedule and the cooldown but still honours the limits.
-- **Override limits:** a tick beside Force Now. For that one forced run it lifts the concurrent-events cap, up to 5.
-  The zombie cap still applies. It clears itself after each Force Now.
+- **Trigger Now:** on the event page. A popup confirms the event and where it will happen. It runs the **saved** options,
+  not unsaved edits, and skips the schedule and the cooldown. Forced events always start and do not count toward
+  Max Concurrent Events.
+- **Import / Export:** the whole config as one JSON file.
+- **Several packs:** an event can use more than one loot or vehicle pack.
+- **Resizable windows:** console windows, including the Server Events bar, can be resized.
 
 Nothing happens on its own until you force an event or arm a Scheduler entry. All events start with default settings
 and no schedules.
@@ -155,12 +157,12 @@ Zombies spawn out of sight near a player and walk to a target.
 
 ### Convoy Wreck
 
-- **Vehicles:** Vehicle Pack, chosen in the picker from the Vehicle Packs page, or Random pack (empty uses the defaults `Base.CarNormal`,
+- **Vehicles:** one or more Vehicle Packs, chosen in the picker from the Vehicle Packs page, or Random pack (empty uses the defaults `Base.CarNormal`,
   `Base.PickUpTruck`, `Base.SUV`, `Base.PickUpVan`, `Base.OffRoad`), Vehicle Count (1 to 6, default 2), Damage (0 to 100
   percent, default 60). Unknown ids are skipped and listed in Logs.
-- A loot crate with the usual loot options sits beside the wrecks, with optional [guards](#guards). For the random
-  location modes it first tries for a road site.
-- Ends when the crate is empty or at the time limit. The wrecks stay in the world.
+- A loot crate with the usual loot options sits beside the wrecks, with [guards](#guards), which Convoy Wreck always
+  has. For the random location modes it first tries for a road site.
+- Ends when its guards are all dead or at the time limit. The crate and the wrecks stay in the world.
 
 ### Under Siege
 
@@ -207,10 +209,8 @@ Location Mode choices (the dropdown also offers Random, which picks one of Town,
 | Random Safehouse | Next to a random safehouse (see [Safety](#safety-and-caps)). |
 | Random Jeem Base | Next to a random Jeem base. Needs Jeem Extension. |
 
-**Countryside avoids forest.** The site must not be in a `Forest` or `DeepForest` zone. The mod reads the map's zone
-data for the square. Only squares zoned as road (`Nav`) or farmland/field, or squares inside the map with no zone, are
-accepted. Town and trailer-park zones are rejected. Town mode always rejects forest. The other modes reject forest while
-**Avoid Forest** is on (the default). The final crate or spawn square is checked again the same way.
+**Avoid Forest** (on by default) is checked on the ground where the event lands. The mod counts trees there; if the spot
+is too wooded, it moves the crate or spawn square to clear ground nearby. The final square is checked the same way.
 
 **The site is picked at landing, not at the announcement.** Lead time only announces. When it ends, the mod picks the
 location, creates the marker and sends the "now on your map" alert. Nobody can wait at the site in advance. If every
@@ -250,7 +250,7 @@ ranged fire or push-back. See [Known limits](#known-limits).
 
 Airdrop, Convoy Wreck and a Hostile Camp's crate use the same loot fields.
 
-- **Loot Pack:** which pack from the Loot Packs page fills the crate, or Random pack.
+- **Loot Pack:** one or more packs from the Loot Packs page fill the crate, or Random pack.
 - The picker opens from the Loot Packs page. Search by name, filter by category, double-click to add. Each row has a chance in
   percent (0 to 100) and a count range (Min to Max, Max at most 100). Up to 100 rows.
 - A crate is never empty: if the rolls give nothing, one item is added. Unknown item ids are skipped and named in the
@@ -262,7 +262,7 @@ Airdrop, Convoy Wreck and a Hostile Camp's crate use the same loot fields.
 and Weapons. Each pack has a tier dropdown (Low, Medium, High), and an event can pick Random Low, Medium or High Tier, which draws from
 the packs with that tier. Each row has a chance and a count. In the
 picker, Add 5 Random fills a pack from whatever the search and filter show. **Items Per Crate** 0 rolls every row by its chance;
-a number picks that many rows at random for each crate. Each crate event names a pack, or Random pack.
+a number picks that many rows at random for each crate. Each crate event names one or more packs, or Random pack.
 
 **Vehicle Packs** are named sets of up to 50 vehicles, chosen from every vehicle script in the game, so modded vehicles appear by
 themselves. Up to 30 packs. A server starts with Civilian Cars, Trucks and Vans, Emergency, and Luxury and Off-Road.
@@ -290,8 +290,8 @@ copy when it sees them, because modData does not sync. Require Radio hides an ev
 
 The Scheduler page holds a table: **On**, **Name**, **Schedule**, **Event**, **Preset**, **Next**. Each row runs one
 event, optionally with a named preset, so random and fixed schedules can coexist. Up to 50 entries; names are 1 to
-40 characters and unique. Buttons: New, Edit, Delete (two-step) and Run Now (two-step), which fires the entry at once and
-ignores timing, the On tick and the cooldown, but still honours the concurrent-events limit. The On tick arms or pauses
+40 characters and unique. Buttons: New, Edit, Delete and Run Now, which ask for confirmation in a popup. Run Now fires the entry at once and
+ignores timing, the On tick and the cooldown, but still waits as Pending when the concurrent-events limit is full. The On tick arms or pauses
 an entry. A preset that is deleted later makes the entry skip, with the reason in Logs.
 
 Each entry uses one **schedule mode**:
@@ -316,7 +316,7 @@ Each entry uses one **schedule mode**:
   opening.
 
 **Conditions** (on every entry, any mode): Min Players (0 to 100, default 1) and Cooldown Minutes (0 to 10080, default
-60, counted from this entry's last firing). A full concurrency limit also counts as a failed condition.
+60, counted from this entry's last firing). A full concurrency limit is not a failed condition: the entry waits as Pending.
 
 **Skip rules**
 
@@ -337,7 +337,8 @@ unpaused.
   burn them: no fire starts there, and every 5 seconds the mod puts out any fire that has spread in. Safehouse and Jeem base location modes aim just outside the zone. A
   Horde can still be sent to walk to a base if you target one.
 - **Zombie cap:** Max Zombies Per Event (default 200) limits guards, horde, super zombies and fallback zombies.
-- **Concurrent events:** Max Concurrent (default 2). Override limits lifts it for one forced run only.
+- **Concurrent events:** Max Concurrent (default 2). Scheduled events wait as Pending while it is full. Forced events
+  always start and do not count toward it.
 - **NPC guards:** at most 10 per event.
 - **Cancel:** every active run has Cancel. It stops the run, its pending spawns and its marker, and the helicopter sound
   and banner. What it cannot remove is listed under [Known limits](#known-limits).
@@ -389,8 +390,7 @@ unpaused.
 - **"No server data yet":** the server did not answer. Check the server log for `[SEM]` lines, and that the server has the
   same mod version as you.
 - **Mod file mismatch on join:** the server runs older files. Restart the server after updating.
-- **"not started: limit reached":** too many events are running. Cancel one, raise Max Concurrent, or tick Override
-  limits for a forced run.
+- **"not started: limit reached":** too many events are running. Cancel one or raise Max Concurrent. Forced events always start.
 - **Nothing at the site:** nobody has loaded the ground yet. Stand within view distance of the marker.
 - **"NPC guards failed ... using zombies":** A-Life is missing, not loaded before this mod, or its internal call failed.
 - **Schedule skipped:** read the reason in Logs (players, cooldown, running events, deleted preset).
@@ -403,7 +403,7 @@ unpaused.
 to another language folder (for example `Translate/FR/UI.json`) and translate the values. Only the strings that go through
 `SEM.t` are covered: window and rail titles, tab names, group headings and option labels. These are not translatable yet:
 the long help blurbs and option titles in `EventDefs.lua` and the Schedule and Conditions schemas, event titles, status
-text and Logs lines (which come from the server), choice labels, buttons such as Save, Cancel and Force Now, and the
+text and Logs lines (which come from the server), choice labels, buttons such as Update, Save As, Cancel and Trigger Now, and the
 default alert texts.
 
 ## Development

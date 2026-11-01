@@ -5,6 +5,12 @@ require "SEM/Config"
 local TOWNS = { "Random", "Muldraugh", "West Point", "Riverside", "Rosewood", "March Ridge", "Louisville", "Ekron", "Brandenburg", "Irvington" }
 local GUARDS = { "none", "zombies", "npc" }
 
+-- D44: random player picks skip characters younger than this
+local function minAge(group, showIf)
+    return { key = "minAgeDays", type = "int", min = 0, max = 3650, default = 0, group = group, showIf = showIf,
+        help = "Random picks skip players whose character has survived fewer days than this. 0 allows anyone. A player you name always counts." }
+end
+
 local function shared(title, message, startMessage, duration)
     return {
         { key = "title", type = "string", default = title, maxLen = 60, group = "Announcement", help = "Headline shown to players on both notifications. Keep it short." },
@@ -22,6 +28,7 @@ local function shared(title, message, startMessage, duration)
         { key = "location", type = "location", optional = true, group = "Location", showIf = { key = "locationMode", equals = "map" }, help = "Exact x, y, z map spot. Leave empty if unsure; Map Pick will fill it later." },
         { key = "town", type = "enum", noRandom = true, choices = TOWNS, default = "Muldraugh", group = "Location", showIf = { key = "locationMode", equals = "town" }, help = "Town the event happens in. Random picks one each time." },
         { key = "chosenPlayer", type = "string", picker = "player", default = "", maxLen = 60, group = "Location", showIf = { key = "locationMode", equals = "nearChosenPlayer" }, help = "The player the event happens near. They must be online when it starts." },
+        minAge("Location", { key = "locationMode", any = { "nearRandomPlayer", "countryside" } }),
         { key = "avoidForest", type = "bool", default = true, group = "Location", help = "Rejects spots in forest or deep forest. Keep on so events do not land where nobody can reach them." },
         { key = "durationMinutes", type = "int", min = 1, max = 240, default = duration, group = "General", help = "How long the event stays active before it is cleaned up, in minutes. 30 is typical." },
     }
@@ -41,7 +48,7 @@ end
 -- loot for an event with a crate: a pack from the Loot Packs page
 local function lootFields(group, showIf)
     return {
-        { key = "lootPack", type = "string", picker = "lootPack", default = "Medium", maxLen = 40, group = group, showIf = showIf, help = "Which pack from the Loot Packs page fills the crate. Random pack picks any one for each crate; Random Low, Medium or High Tier picks among the packs set to that tier." },
+        { key = "lootPack", type = "packList", picker = "lootPack", default = { "Medium" }, group = group, showIf = showIf, help = "Which packs from the Loot Packs page may fill a crate; each crate picks one listed pack. Random pack picks any one; Random Low, Medium or High Tier picks among the packs set to that tier." },
     }
 end
 
@@ -74,6 +81,15 @@ local function leaveMinutes(group)
     return { key = "leaveMinutes", type = "int", min = 1, max = 30, default = 5, group = group, help = "If every player leaves the event area it pauses and everyone is warned. Nobody back within this many minutes, or the targets unload, and the event fails. It never counts as won that way." }
 end
 
+-- D45: a convoy always has guards
+local function convoyGuards(group)
+    local list = guards(group)
+    list[1].choices, list[1].default = { "zombies", "npc", "random" }, "zombies"
+    list[2].min = 1 -- guardCount
+    list[1].help = "Who protects the site: zombies is a fight, npc is armed survivors. Random picks zombies or npc each run."
+    return list
+end
+
 local function add(list, more)
     for _, f in ipairs(more) do list[#list + 1] = f end
     return list
@@ -93,7 +109,7 @@ local EventDefs = {
             { key = "crateCount", type = "int", min = 1, max = 5, default = 1, group = "Crate", help = "How many crates drop. 1 to 5; more crates means more loot to fight over." },
         }), lootFields("Crate")), {
             { key = "smoke", type = "bool", default = true, group = "Crate", help = "Adds a smoke plume so players can spot the site from far away." },
-            { key = "flyoverSound", type = "bool", default = true, group = "Crate", help = "Plays a helicopter flyover during the warning. Needs Sound On. Cancel stops it. Airdrop only." },
+            { key = "flyoverSound", type = "bool", default = true, group = "Crate", help = "Plays a helicopter flyover for 10 seconds once the crates have landed. Needs Sound On. Airdrop only." },
             { key = "removeWhenEmpty", type = "bool", default = true, group = "Crate", help = "Deletes the crate once all items are taken, keeping the map tidy." },
         }), guards("Guards")),
     },
@@ -116,11 +132,12 @@ local EventDefs = {
     {
         id = "horde", title = "Migrating Horde",
         options = add(without(shared("Migrating Horde", "Something big is stirring.", "A horde is on the move.", 30),
-            { locationMode = true, location = true, town = true, chosenPlayer = true, avoidForest = true }), {
+            { locationMode = true, location = true, town = true, chosenPlayer = true, minAgeDays = true, avoidForest = true }), {
             { key = "size", type = "int", min = 1, max = 500, default = 30, group = "Horde", help = "Number of zombies in the horde. 30 is a nuisance, 200 is dangerous; capped by the zombie limit." },
             { key = "spawnDistance", type = "int", min = 30, max = 150, default = 60, group = "Horde", help = "How far from a player the horde starts, in tiles, on loaded ground out of sight. Never closer than 30 to any player. 60 gives players time to react." },
             { key = "respectProtected", type = "bool", default = true, group = "Horde", help = "Keeps the spawn point out of safehouses and Jeem bases. The horde may still walk to them if you target one. Recommended on." },
             { key = "targetType", type = "enum", noRandom = true, choices = { "nearestPlayer", "chosenPlayer", "location", "randomSafehouse", "chosenSafehouse", "randomJeemBase", "chosenJeemBase", "aLifeHome", "random" }, default = "nearestPlayer", group = "Target", labels = { aLifeHome = "A-Life Home" }, help = "Who or what the horde heads for. Nearest player is the simplest choice." },
+            minAge("Target", { key = "targetType", equals = "nearestPlayer" }),
             { key = "targetPlayer", type = "string", picker = "player", default = "", maxLen = 60, group = "Target", showIf = { key = "targetType", equals = "chosenPlayer" }, help = "The player the horde chases. They must be online when it starts." },
             { key = "targetBase", type = "string", picker = "base", default = "", maxLen = 60, group = "Target", showIf = { key = "targetType", any = { "chosenSafehouse", "chosenJeemBase", "aLifeHome" } },
               help = "Which base the horde walks to, from the bases that exist now. For A-Life Home, empty picks one at random." },
@@ -163,20 +180,21 @@ local EventDefs = {
     {
         id = "convoy", title = "Convoy Wreck",
         options = add(add(add(shared("Convoy Wreck", "A convoy has gone quiet on the radio.", "A convoy has crashed.", 45), {
-            { key = "vehiclePack", type = "string", picker = "pack", default = "", maxLen = 40, group = "Vehicles", help = "Which pack of vehicles may appear. Build packs on the Vehicle Packs page, modded vehicles included. Empty uses the default cars. Random pack picks one each run." },
+            { key = "vehiclePack", type = "packList", picker = "pack", default = {}, group = "Vehicles", help = "Which packs of vehicles may appear; the convoy picks one listed pack. Build packs on the Vehicle Packs page, modded vehicles included. Empty uses the default cars. Random pack picks one each run." },
             { key = "vehicleCount", type = "int", min = 1, max = 6, default = 2, group = "Vehicles", help = "Number of wrecked vehicles. 2 looks like a convoy." },
             { key = "damage", type = "int", min = 0, max = 100, default = 60, group = "Vehicles", help = "How wrecked the vehicles are, in percent. 60 is heavily damaged but repairable." },
-        }), lootFields("Loot")), guards("Guards")),
+        }), lootFields("Loot")), convoyGuards("Guards")),
     },
     {
         id = "siege", title = "Under Siege",
         options = add(without(shared("Under Siege", "Armed groups have been seen moving toward a player base.", "Your base is under attack!", 30),
-            { locationMode = true, location = true, town = true, chosenPlayer = true, avoidForest = true }), {
+            { locationMode = true, location = true, town = true, chosenPlayer = true, minAgeDays = true, avoidForest = true }), {
             { key = "siegeTarget", type = "enum", noRandom = true, choices = { "random", "randomSafehouse", "randomJeemBase", "chosenBase" }, default = "random", group = "Target", help = "Which base is attacked. Random picks a safehouse or Jeem base. Random choices only pick bases with a player near, so nobody loses a base while away." },
             { key = "siegeBase", type = "string", picker = "base", default = "", maxLen = 60, group = "Target", showIf = { key = "siegeTarget", equals = "chosenBase" }, help = "The base to attack, from the bases that exist now. The first wave waits until a player is near it." },
             { key = "attackers", type = "int", min = 1, max = 10, default = 4, group = "Attackers", help = "NPCs in each wave, 1 to 10. Needs A-Life." },
             { key = "waves", type = "int", min = 1, max = 6, default = 2, group = "Attackers", help = "How many waves attack. The event ends once every wave has been sent and all attackers are dead." },
-            { key = "waveMinutes", type = "int", min = 1, max = 30, default = 5, group = "Attackers", help = "Minutes between waves." },
+            { key = "waveMinutes", type = "int", min = 1, max = 30, default = 5, group = "Attackers", help = "Minutes of rest between waves, counted from when a wave has been beaten. The next wave is announced after it." },
+            { key = "waveWarnSeconds", type = "int", min = 5, max = 120, default = 30, group = "Attackers", help = "Seconds between the \"They are coming!\" notice and the wave appearing, 5 to 120." },
             npcTier("Attackers"),
             arrowField("Attackers"),
             arrowRange("Attackers"),
@@ -195,15 +213,17 @@ local EventDefs = {
             arrowField("Rescue"),
             arrowRange("Rescue"),
             leaveMinutes("Rescue"),
+            { key = "protectSeconds", type = "int", min = 0, max = 300, default = 60, group = "Rescue", help = "Seconds the stranger cannot be hurt, counted from when the zombies appear, so players have time to arrive. 0 gives no protection." },
         }),
     },
     {
         id = "hunted", title = "Hunted",
         options = add(without(shared("Hunted", "Someone has put a price on a survivor.", "", 30),
-            { startMessage = true, locationMode = true, location = true, town = true, chosenPlayer = true, avoidForest = true, durationMinutes = true,
+            { startMessage = true, locationMode = true, location = true, town = true, chosenPlayer = true, minAgeDays = true, avoidForest = true, durationMinutes = true,
               markerOn = true, markerExact = true, fuzzyRadius = true }), {
             { key = "startMessage", type = "string", default = "{player} is being hunted. They always know where {player} is.", maxLen = 200, group = "Announcement", help = "Second notification, sent the moment the hunt starts. {player} becomes the hunted player's name. If you leave it out, the name goes in front." },
             { key = "huntTarget", type = "enum", noRandom = true, choices = { "randomPlayer", "chosenPlayer" }, default = "randomPlayer", group = "Target", help = "Who is hunted. Random Player picks someone online when the event starts." },
+            minAge("Target", { key = "huntTarget", equals = "randomPlayer" }),
             { key = "huntedPlayer", type = "string", picker = "player", default = "", maxLen = 60, group = "Target", showIf = { key = "huntTarget", equals = "chosenPlayer" }, help = "The player to hunt. They must be online when it starts." },
             { key = "hunters", type = "int", min = 1, max = 10, default = 3, group = "Hunters", help = "NPCs after the player, 1 to 10. Needs A-Life. There is no time limit: it ends when they are dead or the player is. Cancel stops it." },
             npcTier("Hunters"),

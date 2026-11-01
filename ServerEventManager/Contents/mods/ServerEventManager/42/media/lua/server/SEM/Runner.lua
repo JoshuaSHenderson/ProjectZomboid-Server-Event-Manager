@@ -21,6 +21,7 @@ SEM.Runner = Runner
 
 local LIVE = { pending = true, warning = true, active = true, ending = true }
 local MAX_HISTORY = 50
+local FEED_EVERY = 60 -- real seconds between the bar's resends
 local MAX_STEP = 120 -- longest real gap, in seconds, that one update may count (a paused server adds nothing)
 
 Runner.clock = function() return os.time() end
@@ -46,6 +47,14 @@ local function send(to, cmd, args)
 end
 function Runner.toAdmins(cmd, args) send("admins", cmd, args) end
 function Runner.toAll(cmd, args) send("all", cmd, args) end
+
+-- to the players within range tiles of x, y
+function Runner.toNear(x, y, range, cmd, args)
+    for _, p in ipairs(SEM.Targets.players()) do
+        local dx, dy = p:getX() - x, p:getY() - y
+        if dx * dx + dy * dy <= range * range then sendServerCommand(p, MODULE, cmd, args) end
+    end
+end
 
 local function anyAdmin()
     for _, p in ipairs(SEM.Targets.players()) do
@@ -110,7 +119,8 @@ local function record(run, state, reason)
     while #h > MAX_HISTORY do table.remove(h, 1) end
 end
 
--- what the players' event bar lists: titles and states only, never a site. left and age are seconds
+-- what the players' event bar lists: titles and states only, never a site. left and age are seconds. status is the word shown
+-- (Pending, Incoming, Active); a run's own barTitle, barText and barAt (a real-clock deadline) replace title, status and left
 function Runner.feed()
     local out, now = {}, Runner.clock()
     if not Store.world then return out end
@@ -120,9 +130,19 @@ function Runner.feed()
     end
     table.sort(ids, function(a, b) return a.id < b.id end)
     for _, r in ipairs(ids) do
-        out[#out + 1] = { id = r.id, title = r.title, state = r.state, radio = r.options.requireRadio,
-            left = r.state == "warning" and math.max(0, r.warnEnds - now) or nil }
+        local e = { id = r.id, title = r.barTitle or r.title, state = r.state, radio = r.options.requireRadio,
+            status = r.barText or (r.state == "pending" and "Pending") or (r.state == "warning" and "Incoming") or "Active" }
+        if r.barAt then
+            e.left = math.max(0, r.barAt - now)
+        elseif r.state == "warning" then
+            e.left = math.max(0, r.warnEnds - now)
+        elseif r.state == "active" and r.elapsed and not SEM.Events[r.eventId].endless then
+            local seen = math.min(math.max(now - (r.lastSeen or now), 0), MAX_STEP) -- elapsed is stale by up to a minute
+            e.left = math.max(0, r.options.durationMinutes * 60 - r.elapsed - seen)
+        end
+        out[#out + 1] = e
     end
+    for _, e in ipairs(Store.world.queue) do out[#out + 1] = { id = e.id, title = e.title, state = "pending", status = "Pending" } end
     for i = #Store.world.history, 1, -1 do
         local h = Store.world.history[i]
         if #out >= C.BAR_EVENTS then break end
@@ -131,6 +151,14 @@ function Runner.feed()
         end
     end
     return out
+end
+
+local lastFeed = 0
+
+-- the bar to every player; also sent every FEED_EVERY real seconds from Runner.pollNow while a run is live, so clients re-sync their countdowns
+function Runner.sendFeed()
+    lastFeed = Runner.clock()
+    Runner.toAll("eventFeed", { items = Runner.feed() })
 end
 
 local function setState(run, state, reason)
@@ -144,7 +172,7 @@ local function setState(run, state, reason)
         SEM.Spawn.untag(run.id)
     end
     push()
-    Runner.toAll("eventFeed", { items = Runner.feed() })
+    Runner.sendFeed()
 end
 
 -- D17: a schedule that could not fire is logged for admins only; players are told nothing
@@ -164,7 +192,36 @@ local function liveRuns()
     return out
 end
 
-function Runner.liveCount() return #liveRuns() end
+-- forced runs are not counted: only these use up maxConcurrent
+function Runner.liveCount()
+    local n = 0
+    for _, r in ipairs(liveRuns()) do if not r.forced then n = n + 1 end end
+    return n
+end
+
+local function queueChanged()
+    push()
+    Runner.sendFeed()
+end
+
+-- D41: a scheduled start that found every slot taken waits here, first in first out, one entry per schedule. Options are re-resolved
+-- at start. Returns true, or nil and why (also logged)
+function Runner.enqueue(entry, title)
+    local q = Store.world.queue
+    local function skip(why)
+        Runner.logSkip(entry.eventId, entry.name, why)
+        return nil, why
+    end
+    if #q >= C.QUEUE_MAX then return skip("queue full: " .. C.QUEUE_MAX .. " events waiting") end
+    for _, e in ipairs(q) do
+        if e.scheduleId == entry.id then return skip("already waiting in the queue") end
+    end
+    local id = Store.world.nextRunId
+    Store.world.nextRunId = id + 1
+    q[#q + 1] = { id = id, eventId = entry.eventId, scheduleId = entry.id, title = title, at = Runner.clock() }
+    queueChanged()
+    return true
+end
 
 -- what the direction arrows point at: runs with arrowLeft or fewer targets left. An event offers its targets through remaining(run),
 -- which gives { x, y } points and the word for them
@@ -242,11 +299,31 @@ local function sendMarker(run)
     Runner.toAll("markerAdd", Runner.markerArgs(run))
 end
 
+-- the true site goes to admins only (the grey dot), whether or not the event has a marker; never to Runner.toAll
+local function sendExact(run, x, y)
+    local e = run.exact
+    if e and e.x == x and e.y == y then return end
+    run.exact = { x = x, y = y }
+    Runner.toAdmins("markerExact", { id = run.id, x = x, y = y })
+end
+
+-- the dots an admin joining needs: every active run whose site is known
+function Runner.exactDots()
+    local out = {}
+    if not Store.world then return out end
+    for _, r in ipairs(liveRuns()) do
+        if r.exact and r.state == "active" then out[#out + 1] = { id = r.id, x = r.exact.x, y = r.exact.y } end
+    end
+    return out
+end
+
 -- the crate lands up to 15 tiles from the planned target: an exact marker moves onto it; a fuzzy one that no longer
 -- contains it shifts just far enough to (crate 60% of the radius from the centre, so it stays a search circle)
 function Runner.crateLanded(run, x, y)
     local m = run.marker
-    if not m or not LIVE[run.state] then return end
+    if not LIVE[run.state] then return end
+    sendExact(run, x, y)
+    if not m then return end
     if m.exact then
         if m.x == x and m.y == y then return end
         m.x, m.y = x, y
@@ -263,7 +340,9 @@ end
 -- never gives the exact spot away
 function Runner.markerAt(run, x, y)
     local m = run.marker
-    if not m or not LIVE[run.state] then return end
+    if not LIVE[run.state] then return end
+    sendExact(run, x, y)
+    if not m then return end
     m.x, m.y = math.floor(x + (m.ox or 0)), math.floor(y + (m.oy or 0))
     sendMarker(run)
 end
@@ -271,7 +350,9 @@ end
 -- an ownSite event whose start found its site later (Horde waiting for a player): makes and sends the marker then.
 -- Late joiners get it from Runner.markers like any other.
 function Runner.markerLate(run)
-    if run.marker or run.state ~= "active" or not run.x then return end
+    if run.state ~= "active" or not run.x then return end
+    sendExact(run, run.x, run.y)
+    if run.marker then return end
     makeMarker(run)
     if run.marker then sendMarker(run) end
 end
@@ -303,6 +384,7 @@ local function activate(run)
     if not ok then return Runner.fail(run, "start error: " .. tostring(err)) end
     if run.state ~= "active" then return end
     if mod.ownSite and run.x then makeMarker(run) end
+    if run.x and not run.exact then sendExact(run, run.x, run.y) end -- unless start already moved it (crateLanded)
     if run.marker then sendMarker(run) end
     Runner.toAll("alert", { id = run.id, title = o.title, message = Runner.startText(run), sound = o.soundOn, radio = o.requireRadio })
 end
@@ -344,14 +426,6 @@ function Runner.resolveRandom(eventId, opts, rand)
     return out
 end
 
--- the highest maxConcurrent the limits form accepts: what Override limits can lift the cap to
-local function hardConcurrent()
-    for _, f in ipairs(Store.limitsSchema) do
-        if f.key == "maxConcurrent" then return f.max end
-    end
-    return Store.config.limits.maxConcurrent
-end
-
 -- D16: where a player stood when the event was announced. If everyone has left by the time the location is chosen
 -- (nearRandomPlayer, Horde), the run carries on from here instead of failing.
 local function anchorOf()
@@ -363,8 +437,8 @@ local function anchorOf()
 end
 
 -- optionsOverride (a preset's options) replaces the event page's saved options; scheduleName tags the history;
--- override (admin Force with "Override limits") skips maxConcurrent only, never an option bound
-function Runner.begin(eventId, source, optionsOverride, scheduleName, override)
+-- a forced run (source "force", or Run Now) starts whatever the limit and is not counted towards it
+function Runner.begin(eventId, source, optionsOverride, scheduleName, forced)
     if not Store.world then Store.init() end
     local cfg, mod = Store.config.events[eventId], SEM.Events[eventId]
     if not (cfg and mod) then return nil, "this event type is not built yet" end
@@ -379,14 +453,15 @@ function Runner.begin(eventId, source, optionsOverride, scheduleName, override)
         push()
         return nil, reason
     end
-    local live, max = #liveRuns(), Store.config.limits.maxConcurrent
-    if override then max = math.max(max, hardConcurrent()) end -- Override limits lifts maxConcurrent up to its option bound, no further
-    if live >= max then return refuse((override and "hard limit reached: " or "limit reached: ") .. live .. " of " .. max .. " events already running") end
+    forced = forced or source == "force"
+    local live, max = Runner.liveCount(), Store.config.limits.maxConcurrent
+    if not forced and live >= max then return refuse("limit reached: " .. live .. " of " .. max .. " events already running") end
+    run.forced = forced or nil
     Store.world.runs[tostring(id)] = run
     record(run, "pending")
     local lead = opts.leadMinutes
     if lead > 0 then
-        Runner.toAll("alert", { id = id, title = opts.title, sound = opts.soundOn, flyover = opts.soundOn and opts.flyoverSound, -- D27: the start alert stops it
+        Runner.toAll("alert", { id = id, title = opts.title, sound = opts.soundOn,
             radio = opts.requireRadio, message = opts.message .. " Arrives in " .. lead .. " min." })
         run.warnEnds = Runner.clock() + lead * 60
         setState(run, "warning")
@@ -399,6 +474,13 @@ end
 
 function Runner.cancel(runId)
     if not Store.world then Store.init() end
+    for i, e in ipairs(Store.world.queue) do
+        if tostring(e.id) == tostring(runId) then
+            table.remove(Store.world.queue, i)
+            queueChanged()
+            return true
+        end
+    end
     local run = Store.world.runs[tostring(runId)]
     if not run then return nil, "no such run" end
     SEM.Spawn.cancelDefers(run.id)
@@ -438,29 +520,56 @@ function Runner.away(run)
     return true
 end
 
-local function update()
+local function tickElapsed(run, now)
+    run.elapsed = run.elapsed + math.min(math.max(now - run.lastSeen, 0), MAX_STEP)
+    run.lastSeen = now
+end
+
+local function update(only)
     if not Store.world then return end
     local now = Runner.clock()
-    for _, run in ipairs(liveRuns()) do
-        if run.state == "active" then
-            run.elapsed = run.elapsed + math.min(math.max(now - run.lastSeen, 0), MAX_STEP)
-            run.lastSeen = now
-        end
+    for _, run in ipairs(only or liveRuns()) do
+        if run.state == "active" then tickElapsed(run, now) end
         if run.state == "active" and not Runner.away(run) then
             local ok, done = pcall(SEM.Events[run.eventId].update, run)
             if not ok then
                 Runner.fail(run, "update error: " .. tostring(done))
             elseif done then
                 finish(run, tostring(done))
-            elseif not SEM.Events[run.eventId].endless and run.elapsed >= run.options.durationMinutes * 60 then
+            elseif run.state == "active" and not SEM.Events[run.eventId].endless and run.elapsed >= run.options.durationMinutes * 60 then -- an update may have failed it
                 local placing = run.data and run.data.placing
-                if run.placed or placing then finish(run, placing and "time up while still spawning" or "time up")
+                if run.placed and SEM.Events[run.eventId].timeUpFails then Runner.fail(run, "time up with enemies still standing")
+                elseif run.placed or placing then finish(run, placing and "time up while still spawning" or "time up")
                 else Runner.fail(run, "Nobody reached the site before it expired") end
             end
         end
     end
 end
 Runner.update = update
+
+-- D41: when a slot is free and EVENT_GAP real seconds have passed since the last promotion, the head of the queue is rechecked
+-- (schedule still there and on, conditions) and started; one that fails is dropped with the reason and the next is tried
+local lastPromo = 0
+local function promote(now)
+    local q = Store.world.queue
+    while #q > 0 and Runner.liveCount() < Store.config.limits.maxConcurrent do
+        local e = table.remove(q, 1)
+        local entry = Store.config.schedules[e.scheduleId]
+        local run, why
+        if not (entry and entry.enabled) then
+            why = "schedule is no longer enabled"
+        else
+            local ok, reason = SEM.Scheduler.check(entry)
+            if ok then run, why = SEM.Scheduler.fire(entry, false, true) else why = reason end
+        end
+        queueChanged()
+        if run then
+            lastPromo = now
+            return
+        end
+        Runner.logSkip(e.eventId, entry and entry.name or e.title, why)
+    end
+end
 
 local lastPoll = 0
 function Runner.poll()
@@ -473,10 +582,21 @@ end
 
 function Runner.pollNow()
     local now = Runner.clock()
-    for _, run in ipairs(liveRuns()) do
+    local live, due = liveRuns(), {}
+    for _, run in ipairs(live) do
         if run.state == "warning" and now >= run.warnEnds then activate(run) end
+        local mod = SEM.Events[run.eventId]
+        if run.state == "active" and mod.due then -- an event with a deadline in seconds (Siege) is stepped at once, not at the next minute
+            tickElapsed(run, now)
+            local ok, yes = pcall(mod.due, run)
+            if not ok then Runner.fail(run, "update error: " .. tostring(yes))
+            elseif yes then due[#due + 1] = run end
+        end
     end
+    if #due > 0 then update(due) end
+    if #live > 0 and (now - lastFeed >= FEED_EVERY or now < lastFeed) then Runner.sendFeed() end
     sendTrack(now)
+    if #Store.world.queue > 0 and (now - lastPromo >= C.EVENT_GAP or now < lastPromo) then promote(now) end
     if dirty and (now - lastPush >= C.STATUS_PUSH or now < lastPush) then
         if anyAdmin() then push() else dirty = false end
     end

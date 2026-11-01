@@ -49,6 +49,18 @@ end
 function Horde.pickTarget(o, ctx, rand)
     local t = o.targetType
     local function pick(list) return list[rand(#list) + 1] end
+    -- D46: a random pick takes only bases with someone online; a named base with nobody online is refused
+    local function pickOnline(list)
+        local on = {}
+        for _, e in ipairs(list) do if not e.offline then on[#on + 1] = e end end
+        if #on > 0 then return pick(on) end
+    end
+    local function named(list, noun, missing)
+        local e = byId(list, o.targetBase)
+        if not e then return nil, missing .. " " .. tostring(o.targetBase) end
+        if e.offline then return nil, "nobody is online at " .. noun .. " " .. tostring(o.targetBase) end
+        return e
+    end
     local function at(kind, e, extra)
         local r = { kind = kind, x = e.x, y = e.y, name = e.name or e.id or kind }
         for k, v in pairs(extra or {}) do r[k] = v end
@@ -64,9 +76,13 @@ function Horde.pickTarget(o, ctx, rand)
         end
         return nil, "no target of any kind is available"
     elseif t == "nearestPlayer" then
-        local list = ctx.players()
-        if #list == 0 then return nil, "no players online" end
-        return at(t, pick(list), { nearest = true }) -- starts on one player, then follows whoever is nearest the group
+        local all, list = ctx.players(), {}
+        for _, p in ipairs(all) do
+            if SEM.Targets.oldEnough(p.hours, o.minAgeDays) then list[#list + 1] = p end -- D44
+        end
+        if #list == 0 then return nil, #all == 0 and "no players online" or "no player is at least " .. o.minAgeDays .. " days old" end
+        -- starts on one player, then follows whoever is nearest the group among those old enough
+        return at(t, pick(list), { nearest = true, minAgeDays = o.minAgeDays })
     elseif t == "chosenPlayer" then
         for _, p in ipairs(ctx.players()) do
             if p.name == o.targetPlayer and o.targetPlayer ~= "" then return at(t, p, { player = p.name }) end
@@ -79,21 +95,35 @@ function Horde.pickTarget(o, ctx, rand)
     elseif t == "randomSafehouse" or t == "chosenSafehouse" then
         local list = ctx.safehouses()
         if #list == 0 then return nil, "no safehouses exist" end
-        local e = t == "randomSafehouse" and pick(list) or byId(list, o.targetBase)
-        if not e then return nil, "no safehouse titled or owned by " .. tostring(o.targetBase) end
+        if t == "randomSafehouse" then
+            local e = pickOnline(list)
+            if not e then return nil, "no safehouse has anyone online" end
+            return at(t, e)
+        end
+        local e, why = named(list, "safehouse", "no safehouse titled or owned by")
+        if not e then return nil, why end
         return at(t, e)
     elseif t == "randomJeemBase" or t == "chosenJeemBase" then
         local list = ctx.jeem()
         if not list or #list == 0 then return nil, "no Jeem bases (Project A-Life Jimmy not loaded or none exist)" end
-        local e = t == "randomJeemBase" and pick(list) or byId(list, o.targetBase)
-        if not e then return nil, "no Jeem base with id " .. tostring(o.targetBase) end
+        if t == "randomJeemBase" then
+            local e = pickOnline(list)
+            if not e then return nil, "no Jeem base has anyone online" end
+            return at(t, e)
+        end
+        local e, why = named(list, "Jeem base", "no Jeem base with id")
+        if not e then return nil, why end
         return at(t, e)
     elseif t == "aLifeHome" then
         local list = ctx.homes()
         if not list or #list == 0 then return nil, "no A-Life homes (Project A-Life not loaded or none exist)" end
-        local e
-        if (o.targetBase or "") ~= "" then e = byId(list, o.targetBase) else e = pick(list) end
-        if not e then return nil, "no A-Life home with key " .. tostring(o.targetBase) end
+        if (o.targetBase or "") == "" then
+            local e = pickOnline(list)
+            if not e then return nil, "no A-Life home has anyone online" end
+            return at(t, e)
+        end
+        local e, why = named(list, "A-Life home", "no A-Life home with key")
+        if not e then return nil, why end
         return at(t, e)
     end
     return nil, "unknown target type " .. tostring(t)
@@ -102,7 +132,11 @@ end
 -- where the target is now: a player target is re-read every pulse, the nearest-player target is re-chosen from the group's position
 function Horde.where(t, ctx, cx, cy)
     if t.nearest then
-        local p = nearest(ctx.players(), cx, cy)
+        local list = {}
+        for _, p in ipairs(ctx.players()) do
+            if SEM.Targets.oldEnough(p.hours, t.minAgeDays) then list[#list + 1] = p end
+        end
+        local p = nearest(list, cx, cy)
         if p then t.x, t.y, t.name = p.x, p.y, p.name end
     elseif t.player then
         for _, p in ipairs(ctx.players()) do
@@ -117,7 +151,7 @@ end
 local function players()
     local out = {}
     for _, p in ipairs(SEM.Targets.players()) do
-        local ok, e = pcall(function() return { name = tostring(p:getUsername()), x = p:getX(), y = p:getY() } end)
+        local ok, e = pcall(function() return { name = tostring(p:getUsername()), x = p:getX(), y = p:getY(), hours = SEM.Targets.hours(p) } end)
         if ok then out[#out + 1] = e end
     end
     return out
@@ -126,20 +160,9 @@ end
 function Horde.ctx()
     return {
         players = players,
-        safehouses = function()
-            local out = {}
-            pcall(function()
-                local list = SafeHouse.getSafehouseList()
-                for i = 0, list:size() - 1 do
-                    local s = list:get(i)
-                    out[#out + 1] = { id = tostring(s:getTitle()), owner = tostring(s:getOwner()),
-                        x = s:getX() + math.floor(s:getW() / 2), y = s:getY() + math.floor(s:getH() / 2) }
-                end
-            end)
-            return out
-        end,
-        jeem = function() return SEM.Compat_ALife.baseList() end,
-        homes = function() return SEM.Compat_ALife.homes() end,
+        safehouses = SEM.Targets.safehouses,
+        jeem = SEM.Targets.jeem,
+        homes = SEM.Targets.homes,
     }
 end
 
@@ -202,6 +225,11 @@ local function spawnBatch(run, st)
         local x, y = st.sx + ZombRand(17) - 8, st.sy + ZombRand(17) - 8
         local c = getCell():getGridSquare(x, y, 0)
         if c and Spawn.suits(c, o) and farFromPlayers(x, y) then sq = c break end
+    end
+    if not sq then -- players have reached the spawn point: the rest come in from fresh ground, leaning toward the group
+        local p = nearest(players(), st.cx, st.cy)
+        sq = p and findSpawn(o, p, { x = st.cx, y = st.cy })
+        if sq then st.sx, st.sy = sq:getX(), sq:getY() end
     end
     if not sq then
         st.fails = st.fails + 1

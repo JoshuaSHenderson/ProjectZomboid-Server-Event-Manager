@@ -5,7 +5,7 @@ SEM = SEM or {}
 local Compat = {}
 SEM.Compat_ALife = Compat
 
--- list of { id, x, y, z } for Jeem bases, or nil when the mod is absent or its data has another shape
+-- list of { id, x, y, z, owner, ownerKind, createdBy } for Jeem bases, or nil when the mod is absent or its data has another shape
 function Compat.baseList()
     local ok, out = pcall(function()
         local bases = ProjectALifeJimmy.BaseAreas.data().bases
@@ -16,12 +16,29 @@ function Compat.baseList()
                 if r.role == "grounds" or not a then a = r end
             end
             local x, y = a and (a.x1 + a.x2) / 2, a and (a.y1 + a.y2) / 2
-            if type(x) == "number" and type(y) == "number" then list[#list + 1] = { id = id, x = math.floor(x), y = math.floor(y), z = 0 } end
+            if type(x) == "number" and type(y) == "number" then list[#list + 1] = { id = id, x = math.floor(x), y = math.floor(y), z = 0, owner = b.owner, ownerKind = b.ownerKind, createdBy = b.createdBy } end
         end
         return list
     end)
     if ok then return out end
     return nil
+end
+
+-- what A-Life and Jeem call this player, when that differs from the username
+function Compat.keyOf(player)
+    if not (ProjectALife and ProjectALife.Reputation) then return nil end
+    local ok, key = pcall(ProjectALife.Reputation.playerKey, player)
+    return ok and key or nil
+end
+
+-- the vanilla faction name of a player, or nil
+function Compat.factionOf(player)
+    if not Faction then return nil end
+    local ok, name = pcall(function()
+        local f = Faction.getPlayerFaction(player)
+        return f and f:getName()
+    end)
+    return ok and name or nil
 end
 
 -- Jeem base rectangles { id, x1, y1, x2, y2 }, or nil when the mod is absent; used by Safety
@@ -40,7 +57,7 @@ function Compat.baseAreas()
     return nil
 end
 
--- A-Life homes { id, x, y, z } from ProjectALife.BaseHeat.homes() (plan section 3), or nil when A-Life is absent.
+-- A-Life homes { id, x, y, z, owner } from ProjectALife.BaseHeat.homes() (plan section 3), or nil when A-Life is absent.
 -- Each record carries a key and a rectangle x1..y2; id is the key.
 function Compat.homes()
     if not (ProjectALife and ProjectALife.BaseHeat) then return nil end
@@ -49,7 +66,7 @@ function Compat.homes()
         for _, h in ipairs(ProjectALife.BaseHeat.homes()) do
             local x = tonumber(h.x) or (tonumber(h.x1) and tonumber(h.x2) and (h.x1 + h.x2) / 2)
             local y = tonumber(h.y) or (tonumber(h.y1) and tonumber(h.y2) and (h.y1 + h.y2) / 2)
-            if x and y then list[#list + 1] = { id = tostring(h.key or (math.floor(x) .. "," .. math.floor(y))), x = math.floor(x), y = math.floor(y), z = 0 } end
+            if x and y then list[#list + 1] = { id = tostring(h.key or (math.floor(x) .. "," .. math.floor(y))), x = math.floor(x), y = math.floor(y), z = 0, owner = h.owner } end
         end
         return list
     end)
@@ -310,6 +327,13 @@ function Compat.shellOf(uid)
         if z and not z:isDead() and z:getModData().ProjectALifeUID == uid then return z end
     end)
     return ok and shell or nil
+end
+
+-- Turns invulnerability on or off for an NPC's body (setGodMod); true when it worked. False when it has no body right now.
+function Compat.protect(uid, on)
+    local shell = Compat.shellOf(uid)
+    if not shell then return false end
+    return (pcall(function() shell:setGodMod(on) end))
 end
 
 -- where an NPC is: its body when loaded, else A-Life's record; nil when A-Life has dropped it

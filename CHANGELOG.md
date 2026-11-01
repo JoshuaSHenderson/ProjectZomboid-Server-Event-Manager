@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.2.0-beta
+
+### Fixed
+
+- Avoid Forest now works, by counting trees where an event lands and moving it to clear ground.
+- Convoy and Airdrop NPC guards get their overhead icons.
+- A horde no longer stalls when players stand on its spawn point.
+- Events never target a base with nobody online.
+- Scheduler Next column is readable.
+- A dead stranger or a missed rescue ends as Failed.
+
+### Changed
+
+- The event page is one screen: pick a preset, edit, then Update, Save As, Cancel, Delete or Trigger Now.
+- Every event has a Default preset.
+- Confirmations are popups.
+- Forced events always start and do not count toward the limit; Override Limits is removed.
+- Scheduled events wait as Pending when slots are full.
+- Convoy always has guards, ends when they are dead, and its crates stay.
+- Generate Random only adds, and asks how many.
+- Left menu has sections.
+- Under Siege runs wave by wave with notices near the base.
+
+### Added
+
+- Several loot or vehicle packs per event.
+- Resizable windows, including the Server Events bar.
+- Scheduler bulk select.
+- Import / Export of the full config as JSON.
+- Minimum Character Age in Days.
+- Stranger Protected Seconds.
+- Time left and status on the Server Events bar.
+- Exact grey dot on the map for admins.
+- Current server day on the Scheduler.
+- Notifications show one at a time.
+
 ## 0.1.0-beta
 
 - New event Under Siege: A-Life raid waves attack a player's safehouse or Jeem base.

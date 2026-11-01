@@ -104,8 +104,7 @@ local function windows(form, sched, y, clockFn)
     local ws = sched.windows
     local head = SEM.t("grp_Windows", "Windows")
     table.insert(form.heads, { head, y })
-    form:help(WINDOWS_HELP, LX + T.tw(head) + 8, y - 2)
-    y = y + 24
+    y = form:para(WINDOWS_HELP, y + 24)
     table.insert(form.marks, { function() return "SERVER " .. F.clockText(clockFn()) end, LX, y, T.c.amber })
     table.insert(form.marks, { function() return "NEXT " .. F.nextText(S.nextOpen(sched, clockFn())) end, LX + 150, y, T.c.green })
     y = y + 24
@@ -138,11 +137,22 @@ local function windows(form, sched, y, clockFn)
     return y
 end
 
+-- every label the schedule fields add to the label column (for Form:measure)
+function S.labels()
+    local out = { "Mode" }
+    for _, list in ipairs({ RAND, SCHED, COND }) do
+        for _, t in ipairs(SEM.Form.labels(list)) do out[#out + 1] = t end
+    end
+    return out
+end
+
 -- clockFn returns {dow, hour, minute}; noOff drops the Off mode (scheduler entries use the On tick instead)
 function S.build(form, sched, cond, y, clockFn, noOff)
     table.insert(form.heads, { SEM.t("grp_Schedule", "Schedule"), y })
     y = y + 24
-    form:label("Mode", y, "schedule.mode", 390, y)
+    local cx = form.cx
+    local mhelp = noOff and "When this entry fires by itself. Pick one mode. To pause the entry, clear its On tick on the Scheduler page." or S.SCHEMA[1].help
+    form:label("Mode", y, "schedule.mode", cx + 200, y, mhelp)
     local modes, names = {}, {}
     for _, v in ipairs(MODES) do
         if not (noOff and v == "off") then
@@ -150,8 +160,7 @@ function S.build(form, sched, cond, y, clockFn, noOff)
             names[#names + 1] = F.label(S.SCHEMA[1], v)
         end
     end
-    form:help(noOff and "When this entry fires by itself. Pick one mode. To pause the entry, clear its On tick on the Scheduler page." or S.SCHEMA[1].help, 168, y)
-    form:combo("schedule.mode", 190, y, 190, modes, sched.mode, function(v) sched.mode = v; form.onChange(true) end, names)
+    form:tip(form:combo("schedule.mode", cx, y, form:cw(190), modes, sched.mode, function(v) sched.mode = v; form.onChange(true) end, names), mhelp)
     y = y + 32
     if sched.mode == "randomGame" then y = form:addFields(RAND, sched, y, "schedule")
     elseif sched.mode == "scheduledGame" then y = form:addFields(SCHED, sched, y, "schedule")
