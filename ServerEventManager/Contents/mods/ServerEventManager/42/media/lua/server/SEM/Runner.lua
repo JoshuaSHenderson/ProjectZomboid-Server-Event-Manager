@@ -551,34 +551,18 @@ function Runner.cancel(runId)
     return true
 end
 
--- True while an event is paused because every player left its area. A zombie that unloads looks the same as one that died, so nothing
--- here may reach an event's update: it would read as a win. A lower count while nobody is near means they unloaded, and the run fails.
+-- True while an event is paused because every player left its area: nothing decides on unloaded state, and the event never fails
+-- for it. It carries on when a player returns (elapsed time keeps counting).
 function Runner.away(run)
-    local mod, o = SEM.Events[run.eventId], run.options
-    if not (run.placed and mod.remaining and o.leaveMinutes) then return false end
+    local mod = SEM.Events[run.eventId]
+    if not (run.placed and mod.remaining) then return false end
     local ok, points = pcall(mod.remaining, run)
     if not (ok and points) then return false end -- no targets to speak of yet, or released by a restart: its update says so
     local area, near = mod.areaRange or C.EVENT_AREA, false
     if run.x then near = SEM.Spawn.playerNear(run.x, run.y, area) end
     for _, p in ipairs(points) do near = near or SEM.Spawn.playerNear(p.x, p.y, area) end
-    if near then
-        if run.awayAt then Runner.toAll("alert", { id = run.id, title = o.title, message = "Players are back. The event carries on.", radio = o.requireRadio }) end
-        run.awayAt, run.awayCount, run.lastCount = nil, nil, #points
-        return false
-    end
-    local now = Runner.clock()
-    if not run.awayAt then
-        run.awayAt, run.awayCount = now, run.lastCount or #points
-        Runner.toAll("alert", { id = run.id, title = o.title, sound = o.soundOn, radio = o.requireRadio,
-            message = "Everyone has left the area. Return within " .. o.leaveMinutes .. " min or it fails." })
-    end
-    if #points < run.awayCount then
-        Runner.fail(run, "abandoned: everyone left and its targets unloaded")
-    elseif now - run.awayAt >= o.leaveMinutes * 60 then
-        Runner.fail(run, "abandoned: nobody returned in " .. o.leaveMinutes .. " min")
-    else
-        Runner.status(run, "Paused, nobody near: fails in " .. math.max(0, o.leaveMinutes * 60 - (now - run.awayAt)) .. "s")
-    end
+    if near then return false end
+    Runner.status(run, "Paused, nobody near; waiting for a player to return")
     return true
 end
 

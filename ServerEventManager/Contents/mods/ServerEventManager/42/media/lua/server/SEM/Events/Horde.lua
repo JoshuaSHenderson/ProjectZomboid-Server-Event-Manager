@@ -139,26 +139,18 @@ local function findSpawn(o, anchor, t)
     end
 end
 
-local function alive(e)
-    local ok, v = pcall(function() return e.z:getOnlineID() == e.id and not e.z:isDead() end)
-    return ok and v
-end
-
--- drops the dead and the replaced; returns alive count and sets the group centre
+-- drops the killed; returns the living count (unloaded ones included) and sets the group centre from the loaded ones
 function Horde.survey(st)
-    local keep, sx, sy = {}, 0, 0
+    local n = Spawn.survey(st.refs)
+    local sx, sy, k = 0, 0, 0
     for _, e in ipairs(st.refs) do
-        if alive(e) then
+        if Spawn.loaded(e) then
             local ok, x, y = pcall(function() return e.z:getX(), e.z:getY() end)
-            if ok then
-                keep[#keep + 1] = e
-                sx, sy = sx + x, sy + y
-            end
+            if ok then sx, sy, k = sx + x, sy + y, k + 1 end
         end
     end
-    st.refs = keep
-    if #keep > 0 then st.cx, st.cy = sx / #keep, sy / #keep end
-    return #keep
+    if k > 0 then st.cx, st.cy = sx / k, sy / k end
+    return n
 end
 
 -- one batch of a run's zombies for its state; Siege spawns its zombie waves with it
@@ -191,7 +183,9 @@ function Horde.spawnBatch(run, st)
     for i = 0, list:size() - 1 do
         local ok, id = pcall(function() return list:get(i):getOnlineID() end)
         if ok and id then
-            st.refs[#st.refs + 1] = { id = id, z = list:get(i) }
+            local ref = { id = id, z = list:get(i) }
+            SEM.Spawn.track(run, ref)
+            st.refs[#st.refs + 1] = ref
             SEM.Spawn.tag(run, list:get(i), id, "HostileZombie")
             st.spawned = st.spawned + 1
         end
@@ -265,7 +259,14 @@ end
 function Horde.update(run)
     if not run.placed then return false end
     local st = Horde.state[run.id]
-    if not st then return "released by a restart; the zombies stay in the world" end
+    if not st then
+        local refs, total = Spawn.ledgerRefs(run)
+        if not refs then return "released by a restart; the zombies stay in the world" end
+        st = Horde.newState(run.x, run.y, 0, run.options.pulseInterval) -- a restart lost the list: rebuilt from the ledger
+        st.refs, st.spawned = refs, run.data.spawned or total
+        st.want = run.data.want or st.spawned
+        Horde.state[run.id] = st
+    end
     local n = Horde.survey(st)
     if st.left == 0 and n == 0 then return st.spawned == 0 and "no zombies spawned" or "all dead" end
     local now = SEM.Runner.clock()

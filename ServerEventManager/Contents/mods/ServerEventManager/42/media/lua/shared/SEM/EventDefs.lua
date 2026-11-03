@@ -109,10 +109,6 @@ local function arrowRange(group)
     return { key = "arrowRange", type = "int", min = 10, max = 2000, default = 150, group = group, help = "Only players this many tiles or closer to the nearest target get the arrow. 150 is a few blocks." }
 end
 
-local function leaveMinutes(group)
-    return { key = "leaveMinutes", type = "int", min = 1, max = 30, default = 5, group = group, help = "If every player leaves the event area it pauses and everyone is warned. Nobody back within this many minutes, or the targets unload, and the event fails. It never counts as won that way." }
-end
-
 -- D45: a convoy always has guards
 local function convoyGuards(group)
     local list = guards(group)
@@ -159,7 +155,6 @@ local EventDefs = {
         }), lootFields("Loot", { key = "lootCrate", equals = true })), {
             arrowField("Group"),
             arrowRange("Group"),
-            leaveMinutes("Group"),
             { key = "fallbackCount", type = "int", min = 0, max = 500, default = 10, group = "Fallback", help = "Raider zombies spawned around the crate when survivors cannot be created. 0 means no camp without A-Life. Capped by the zombie limit." },
             { key = "fallbackOutfit", type = "string", picker = "outfit", default = "", maxLen = 60, group = "Fallback", help = "Outfit those substitute zombies wear. Empty uses the Bandit outfit." },
         }),
@@ -178,7 +173,6 @@ local EventDefs = {
             { key = "requirePlayerNear", type = "bool", default = true, group = "Target", help = "On: the run fails if no player is within 200 tiles of the target when it starts. Off: it runs anyway, but the horde may stall far from anyone." },
             arrowField("Horde"),
             arrowRange("Horde"),
-            leaveMinutes("Horde"),
             { key = "pulseInterval", type = "int", min = 5, max = 120, default = 15, group = "Pulse", help = "Seconds between nudges that pull the horde toward its target. 15 is steady." },
             { key = "pulseRadius", type = "int", min = 10, max = 100, default = 40, group = "Pulse", help = "How wide each nudge reaches, in tiles. 40 keeps the horde on track." },
         }),
@@ -205,7 +199,6 @@ local EventDefs = {
             { key = "markZombies", type = "bool", default = true, group = "Zombies", help = "Gives super zombies toxic green skin, and the boss red skin, each with a floating tag so players can tell them apart. Off leaves them looking like any other zombie." },
             arrowField("Zombies"),
             arrowRange("Zombies"),
-            leaveMinutes("Zombies"),
             { key = "boss", type = "bool", default = false, group = "Boss", help = "Makes one of them a boss with much more health. It counts toward Count." },
             { key = "bossHp", type = "float", min = 1, max = 50, default = 10, group = "Boss", showIf = { key = "boss", equals = true }, help = "Boss health multiplier. 10 is a long fight; keep modest for small groups." },
             { key = "followMarker", type = "bool", default = true, group = "Map marker", help = "Moves the map marker along with the zombies as they travel." },
@@ -238,7 +231,6 @@ local EventDefs = {
             extraPct("Attackers"),
             arrowField("Attackers"),
             arrowRange("Attackers"),
-            leaveMinutes("Attackers"),
             { key = "spawnDistance", type = "int", min = 25, max = 60, default = 40, group = "Attackers", help = "How far from the base each wave starts, in tiles, then it marches in. 40 gives defenders time to get ready." },
             { key = "returnMinutes", type = "int", min = 1, max = 60, default = 5, group = "Defence", help = "Minutes players have to be at the base. The clock starts with the siege and again at each wave's warning. If nobody came within 100 tiles of the base by then, the wave attacks anyway and the siege fails." },
             { key = "takeover", type = "bool", default = true, group = "Defence", help = "When nobody defended the base: its loot is destroyed, fires start, and the enemies occupy it, all when a player next loads the base. This is the one thing that ignores safehouse protection." },
@@ -257,7 +249,6 @@ local EventDefs = {
             { key = "rewardRange", type = "int", min = 5, max = 200, default = 40, group = "Rescue", help = "Only players this many tiles from the stranger or closer when the wave falls get the bonus, and they see the reputation notice." },
             arrowField("Rescue"),
             arrowRange("Rescue"),
-            leaveMinutes("Rescue"),
             { key = "protectSeconds", type = "int", min = 0, max = 300, default = 60, group = "Rescue", help = "Seconds the stranger cannot be hurt, counted from when the zombies appear, so players have time to arrive. 0 gives no protection." },
         }),
     },

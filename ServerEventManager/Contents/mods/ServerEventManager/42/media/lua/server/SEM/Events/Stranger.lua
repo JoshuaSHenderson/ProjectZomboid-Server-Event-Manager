@@ -86,14 +86,17 @@ function Stranger.update(run)
         end
     end
     local st = Stranger.state[run.id]
-    if not st then return "released by a restart; no reward" end
-    local keep = {}
-    for _, e in ipairs(st.refs) do if Spawn.alive(e) then keep[#keep + 1] = e end end
-    st.refs = keep
-    if #keep == 0 then return reward(run, o) end
+    if not st then
+        local refs, n = Spawn.ledgerRefs(run) -- a restart lost the wave's list: rebuilt from the ledger
+        if not refs then return "released by a restart; no reward" end
+        st = { refs = refs, tracked = n }
+        Stranger.state[run.id] = st
+    end
+    local left = Spawn.survey(st.refs)
+    if left == 0 then return reward(run, o) end
     pcall(function() getWorldSoundManager():addSound(nil, run.x, run.y, 0, C.STRANGER_NEAR, C.STRANGER_NEAR) end) -- keeps the wave on them
     local safe = d.protectUntil and ", protected " .. math.ceil(d.protectUntil - SEM.Runner.clock()) .. "s" or ""
-    SEM.Runner.status(run, #keep .. " of " .. st.tracked .. " zombies left, stranger alive" .. safe)
+    SEM.Runner.status(run, left .. " of " .. st.tracked .. " zombies left, stranger alive" .. safe)
     return false
 end
 

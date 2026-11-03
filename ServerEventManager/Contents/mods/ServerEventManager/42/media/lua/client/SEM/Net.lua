@@ -111,4 +111,15 @@ Events.OnGameStart.Add(function()
     Net.send("hello", {})
 end)
 
+-- the reply to hello can be missed on a fresh login: ask again every 5 s until markerState arrives (Markers sets helloAcked), 6 times at most
+local sends, lastHello = 1, nil
+Events.OnTick.Add(function()
+    if Net.helloAcked or sends >= 6 then return end
+    local now = getTimestampMs()
+    lastHello = lastHello or now
+    if now - lastHello < 5000 then return end
+    lastHello, sends = now, sends + 1
+    Net.send("hello", {})
+end)
+
 return Net

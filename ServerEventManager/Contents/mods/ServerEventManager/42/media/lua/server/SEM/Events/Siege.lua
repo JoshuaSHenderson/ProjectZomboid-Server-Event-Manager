@@ -72,8 +72,6 @@ local function enter(run, phase, wait)
     if phase == "incoming" then
         d.returnAt, d.seen = run.elapsed + (run.options.returnMinutes or 5) * 60, false
         watch(run)
-    elseif phase == "attacking" then
-        run.lastCount, run.awayAt, run.awayCount = nil, nil, nil -- Runner.away counts this wave afresh, not the last one
     end
     bar(run, phase == "attacking" and "Attacking" or "Incoming Wave", wait)
     SEM.Runner.sendFeed()
@@ -109,18 +107,30 @@ local function sendWave(run, o, player)
     enter(run, "attacking")
 end
 
--- the zombies of the wave being fought: alive (and still to spawn), and in all; 0 of 0 after a restart
-local function zombies(run)
+-- the state of a zombie wave; after a restart it is rebuilt from the run's ledger (nil when no zombie of it lives)
+local function waveState(run)
     local st = Horde.state[run.id]
+    if st or run.data.waveType ~= "zombies" then return st end
+    local refs = Spawn.ledgerRefs(run)
+    if not (refs and refs[1]) then return nil end
+    st = Horde.newState(run.x, run.y, 0, PULSE.pulseInterval)
+    st.refs, st.spawned, st.want = refs, #refs, #refs
+    Horde.state[run.id] = st
+    return st
+end
+
+-- the zombies of the wave being fought: alive (and still to spawn), and in all; 0 of 0 when none
+local function zombies(run)
+    local st = waveState(run)
     if not st then return 0, 0 end
     return Horde.survey(st) + st.left, st.want
 end
 
--- true when the wave being fought is dead. A zombie wave is its refs, gone with a restart: that counts as beaten
+-- true when the wave being fought is dead (a zombie wave with no state and no living ledger zombie counts as beaten)
 local function beaten(run)
     local d = run.data
     if d.waveType ~= "zombies" then return Camp.cleared(d, SEM.Runner.clock()) end
-    local st = Horde.state[run.id]
+    local st = waveState(run)
     return not st or (st.left == 0 and Horde.survey(st) == 0)
 end
 

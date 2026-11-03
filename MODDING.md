@@ -308,19 +308,17 @@ next `update`, or use `due` to make that `update` come at once.
 | `endless = true` | No time limit. Ends only by `update`, fail or Cancel. You may drop `durationMinutes`. |
 | `timeUpFails = true` | Time up with `run.placed` fails instead of ending. |
 | `due(run)` | Called about once a real second while active. Return `true` to run `update` now. |
-| `remaining(run)` | Return a list of `{ x, y }` targets left and a noun, e.g. `return points, "zombies"`. Drives direction arrows when the options have `arrowLeft` (> 0) and `arrowRange`, and the leave check when they have `leaveMinutes` and `run.placed` is set. |
+| `remaining(run)` | Return a list of `{ x, y }` targets left and a noun, e.g. `return points, "zombies"`. Drives direction arrows when the options have `arrowLeft` (> 0) and `arrowRange`, and the leave check when `run.placed` is set. |
 | `areaRange` | Tiles around the site and targets that count as "near" for the leave check. Default 100 (`SEM.Config.EVENT_AREA`). |
 
-The leave check: when no player is within `areaRange` of the site or any target, the run pauses (`update` is not called),
-everyone is warned, and the run fails after `leaveMinutes` or as soon as the target count drops. Returning `nil` from
-`remaining` skips the check.
+The leave check: when no player is within `areaRange` of the site or any target, the run pauses (`update` is not called) until
+a player is near again. It never fails the run. Returning `nil` from `remaining` skips the check.
 
-Fields for the arrows and the leave check, if you want them (copy of the built-ins' fields):
+Fields for the arrows, if you want them (copy of the built-ins' fields):
 
 ```lua
 { key = "arrowLeft", type = "int", min = 0, max = 20, default = 3, group = "Targets", help = "Arrow to the nearest target once this many or fewer are left. 0 is off." },
 { key = "arrowRange", type = "int", min = 10, max = 2000, default = 150, group = "Targets", help = "Only players this close to a target get the arrow." },
-{ key = "leaveMinutes", type = "int", min = 1, max = 30, default = 5, group = "Targets", help = "If every player leaves, the event fails after this many minutes." },
 ```
 
 ## 5. Helpers
@@ -348,7 +346,8 @@ All on `SEM.Spawn` (server only) unless the name says otherwise.
 | `weaponPack(o, run)` | The weapon pack `{ name, weapons, ammo }` picked from `o.weaponPack`, or nil to keep the NPC Level's weapons (warns in Logs when `run` is given and the pack is gone). Pass it as the last argument of `SEM.Compat_ALife.spawnGuards` / `spawnCamp` / `spawnRaid` / `spawnHunters` to arm a group you spawn yourself. |
 | `guards(run, square, count, radius, pct, outfit, refs, done, per, unsafe)` | Zombies in batches across ticks, never on protected ground unless `unsafe`. Count capped by `clamp`. `done(spawned, sprinters)`. |
 | `clamp(n)` | `n` limited to the server's `maxZombiesPerEvent`. Use it for any zombie count you spawn yourself. |
-| `alive(ref)`, `refPoints(refs)` | For `{ id, z }` refs collected by `guards`: is it alive; `{ x, y }` of the living ones (good for `remaining`). |
+| `alive(ref)`, `survey(refs)`, `refPoints(refs)` | For refs collected by `guards` (each is put in the run's saved ledger, `run.data.zs`, by persistent outfit id): `alive` is true until the game reports the zombie killed, loaded or not; `survey` drops the killed and returns the living count; `refPoints` gives `{ x, y }` of the living ones that are loaded (good for `remaining`). |
+| `ledgerRefs(run)`, `track(run, ref)`, `loaded(ref)` | After a restart: refs for the living ledger zombies (they are found again when they load), and the ledger total; `track` adds a zombie you spawned yourself; `loaded` is true while that body is loaded and alive. |
 | `settle(run, text)` | In `update`: after a restart lost the guard jobs, clears `run.data.placing` and sets a status. |
 | `playerNear(x, y, range)` | Any online player within `range` tiles. |
 | `SEM.Runner.crateLanded(run, x, y)` | The site moved a little: moves an exact marker onto it, shifts a fuzzy one only if needed. |

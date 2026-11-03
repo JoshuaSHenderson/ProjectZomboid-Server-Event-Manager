@@ -170,18 +170,17 @@ function Convoy.start(run)
     Spawn.defer(run, run.x, run.y, function() place(run, run.options) end)
 end
 
-local function survey(st)
-    local keep = {}
-    for _, e in ipairs(st.refs) do if Spawn.alive(e) then keep[#keep + 1] = e end end
-    st.refs = keep
-    return #keep
-end
+local function survey(st) return Spawn.survey(st.refs) end
 
 function Convoy.update(run)
     if not run.placed then return false end
     local what = "Wreck: " .. (run.data.vehicles or 0) .. " vehicle(s)"
     Spawn.settle(run, what)
     local d, st, left, total = run.data, Convoy.state[run.id], nil, nil
+    if not st and not d.want then -- a restart lost the guards' list: rebuilt from the ledger
+        local refs, n = Spawn.ledgerRefs(run)
+        if refs then st = { refs = refs, tracked = n, total = n }; Convoy.state[run.id] = st end
+    end
     if d.want then
         local Camp = SEM.Events.camp
         Camp.hookALife()

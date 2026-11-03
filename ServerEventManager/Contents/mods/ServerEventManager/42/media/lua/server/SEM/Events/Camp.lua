@@ -163,12 +163,7 @@ function Camp.start(run)
     Spawn.defer(run, run.x, run.y, function() place(run, run.options) end)
 end
 
-local function survey(st)
-    local keep = {}
-    for _, e in ipairs(st.refs) do if Spawn.alive(e) then keep[#keep + 1] = e end end
-    st.refs = keep
-    return #keep
-end
+local function survey(st) return Spawn.survey(st.refs) end
 
 function Camp.update(run)
     if not run.placed then return false end
@@ -177,6 +172,10 @@ function Camp.update(run)
     if d.released then return "released by a restart; the raiders stay in the world" end
     if d.crates and Spawn.cratesEmpty(run) then return "all loot taken" end
     local st, left, total = Camp.state[run.id], nil, nil
+    if not st and not d.want then -- a restart lost the raiders' list: rebuilt from the ledger
+        local refs, n = Spawn.ledgerRefs(run)
+        if refs then st = { refs = refs, tracked = n }; Camp.state[run.id] = st end
+    end
     if d.want then
         if Camp.cleared(d, now) then return "camp cleared" end
         left, total = #d.uids - Camp.deadCount(d), #d.uids

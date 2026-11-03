@@ -185,6 +185,7 @@ end
 
 -- full replacement, sent in answer to hello; an empty list arrives as nil
 function on.markerState(a)
+    SEM.Net.helloAcked = true
     for _, m in pairs(list) do erase(m) end
     list = {}
     for _, m in ipairs(a.markers or {}) do add(m) end

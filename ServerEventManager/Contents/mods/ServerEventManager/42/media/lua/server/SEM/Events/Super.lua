@@ -32,28 +32,28 @@ local function toughen(ref, hp, kind)
     return okHp, (setSpeed(ref.z, kind))
 end
 
-local function centre(refs)
-    local sx, sy = 0, 0
+-- centre of the loaded ones; (x, y) when none is loaded
+local function centre(refs, x, y)
+    local sx, sy, k = 0, 0, 0
     for _, e in ipairs(refs) do
-        local ok, x, y = pcall(function() return e.z:getX(), e.z:getY() end)
-        if ok then sx, sy = sx + x, sy + y end
+        local ok, zx, zy = pcall(function() return e.z:getX(), e.z:getY() end)
+        if ok and Spawn.loaded(e) then sx, sy, k = sx + zx, sy + zy, k + 1 end
     end
-    return sx / #refs, sy / #refs
+    if k == 0 then return x, y end
+    return sx / k, sy / k
 end
 
-local function survey(st)
-    local keep = {}
-    for _, e in ipairs(st.refs) do if Spawn.alive(e) then keep[#keep + 1] = e end end
-    st.refs = keep
-    return #keep
-end
+local function survey(st) return Spawn.survey(st.refs) end
 
 -- the marked ids of every run: { ids, boss }; clients skin the boss differently
 function Super.marks()
     local ids, boss = {}, {}
     for _, st in pairs(Super.state) do
         for _, e in ipairs(st.mark and st.refs or {}) do
-            if e == st.boss then boss[#boss + 1] = e.id else ids[#ids + 1] = e.id end
+            -- loaded bodies only: an unloaded zombie's online id is reused by another, which would get the skin (rebind refreshes it)
+            if Spawn.loaded(e) then
+                if e == st.boss then boss[#boss + 1] = e.id else ids[#ids + 1] = e.id end
+            end
         end
     end
     return { ids = ids, boss = boss }
@@ -108,7 +108,7 @@ local function place(run, o)
         if not Spawn.outfitOk(bossOutfit) then bossOutfit = nil end
         want = want - 1
         local mark = tough(o.bossHp)
-        Spawn.guards(run, sq, 1, 4, 0, bossOutfit, st.refs, body, function(e) mark(e); st.boss = e end)
+        Spawn.guards(run, sq, 1, 4, 0, bossOutfit, st.refs, body, function(e) mark(e); st.boss = e; run.data.bossPid = e.pid end)
     else
         body()
     end
@@ -127,7 +127,14 @@ end
 function Super.update(run)
     if not run.placed then return false end
     local st = Super.state[run.id]
-    if not st then return "released by a restart; the zombies stay in the world" end
+    if not st then
+        local refs, total = Spawn.ledgerRefs(run)
+        if not refs then return "released by a restart; the zombies stay in the world" end
+        local now = SEM.Runner.clock() -- a restart lost the list: rebuilt from the ledger
+        st = { refs = refs, spawned = run.data.spawned or total, lastMarker = now, lastSent = now, mark = run.options.markZombies }
+        for _, e in ipairs(refs) do if e.pid == run.data.bossPid then st.boss = e end end
+        Super.state[run.id] = st
+    end
     local n = survey(st)
     if n == 0 then return "all dead" end
     local now = SEM.Runner.clock()
@@ -137,7 +144,7 @@ function Super.update(run)
     end
     if run.options.followMarker and now - st.lastMarker >= C.MARKER_EVERY then
         st.lastMarker = now
-        local cx, cy = centre(st.refs)
+        local cx, cy = centre(st.refs, run.x, run.y)
         run.x, run.y = math.floor(cx), math.floor(cy)
         SEM.Runner.markerAt(run, cx, cy)
     end

@@ -3,7 +3,7 @@
 Project Zomboid Build 42 mod for multiplayer servers. It gives server admins an in-game console to set up,
 force, schedule and cancel server events: airdrops, hostile camps, migrating hordes, wildfires, super zombies, convoy
 wrecks, sieges, manhunts, rescue calls and aircraft crashes. Players get on-screen alerts, a sound and map markers. Mod id
-`ServerEventManager`, author JoshuaSHenderson, version 0.3.1-beta.
+`ServerEventManager`, author JoshuaSHenderson, version 0.3.2-beta.
 
 > **Beta, under active development. Expect bugs.** If you hit one, please
 > [open an issue](https://github.com/JoshuaSHenderson/ProjectZomboid-Server-Event-Manager/issues) with what you did and your `console.txt`.
@@ -373,10 +373,14 @@ loaded yet keep their level's weapons.
 
 ## Leaving an event
 
-If every player leaves the area of a Camp, Horde, Super Zombies, Under Siege or Stranger event (100 tiles, 160 for a Horde), it pauses
-and everyone is warned. Nobody back within Leave Minutes (default 5), or its targets unload, and it fails as abandoned. A zombie that
-unloads looks the same to the game as one that died, so this is what stops leaving from counting as a win. Under Siege checks
-this only while a wave is attacking; between waves, Return Minutes decides instead.
+Events carry on unchanged through log outs, a paused server (PauseEmpty) and server restarts. If every player leaves the area of
+an event (100 tiles, 160 for a Horde), it pauses, with nothing decided while nobody is there, and carries on when a player returns.
+It never fails for being left; its time limit still counts while the server runs. Under Siege's Return Minutes is the one
+exception: nobody back at the base in time and it is taken over.
+
+An event's zombies are kept with the run by their persistent outfit id, which B42 keeps when a zombie unloads. A zombie counts as
+gone only when the game reports it killed, so one that unloads, or a restart, never counts as a win, and its arrows and marker find
+it again when it loads. A zombie the game removes without a death keeps the event going until its time limit.
 
 ## Event bar, arrows and map
 

@@ -3313,13 +3313,13 @@ t("SEMType: hostiles are tagged, listed, and dropped when dead or their event en
     Sp.tagsDue()
 end)
 
-t("leaving an event pauses it: an unload is never a win", function()
+t("leaving an event pauses it and never fails it", function()
     freshWorld()
     local keep, updates = SEM.Events.super, 0
     local pts = { { x = 10, y = 10 }, { x = 11, y = 10 } }
     SEM.Events.super = { remaining = function() return pts end, update = function() updates = updates + 1; return false end, stop = function() end }
     local run = { id = 960, eventId = "super", state = "active", placed = true, title = "S", x = 10, y = 10, data = {}, elapsed = 0, lastSeen = now,
-        options = { leaveMinutes = 2, durationMinutes = 60, title = "S", soundOn = false } }
+        options = { durationMinutes = 60, title = "S", soundOn = false } }
     Store.world.runs["960"] = run
     local realNear = SEM.Spawn.playerNear
     local here = true
@@ -3330,40 +3330,31 @@ t("leaving an event pauses it: an unload is never a win", function()
     sent = {}
     R.update()
     check("away: paused", updates, 1)
-    local warned
-    for _, m in ipairs(sent) do if m.cmd == "alert" then warned = m.args.message end end
-    check("players are warned", warned:find("Return within 2 min", 1, true) ~= nil, true)
+    check("away: returns true", R.away(run), true)
+    check("away: status", run.status, "Paused, nobody near; waiting for a player to return")
+    for _, m in ipairs(sent) do check("no alert", m.cmd == "alert", false) end
+    pts = {}
+    now = now + 3600
+    R.update()
+    check("unloaded and long away: still active", run.state, "active")
     here = true
     R.update()
-    check("back in time: runs again", updates, 2)
-    check("timer cleared", run.awayAt, nil)
-    here = false
-    R.update()
-    pts = {}
-    R.update()
-    check("unloaded while away fails", run.state, "failed")
-    check("not a win", updates, 2)
-    pts = { { x = 10, y = 10 } }
-    local run2 = { id = 961, eventId = "super", state = "active", placed = true, title = "S", x = 10, y = 10, data = {}, elapsed = 0, lastSeen = now,
-        options = { leaveMinutes = 2, durationMinutes = 60, title = "S" } }
-    Store.world.runs["961"] = run2
-    R.update()
-    now = now + 121
-    R.update()
-    check("nobody back in time fails", run2.state, "failed")
+    check("back: runs again", updates, 2)
     SEM.Events.super, SEM.Spawn.playerNear = keep, realNear
     freshWorld()
 end)
 
 t("super marks split the boss out", function()
     local S2 = SEM.Events.super
-    local boss, plain = { id = 1 }, { id = 2 }
-    S2.state[777] = { mark = true, boss = boss, refs = { boss, plain } }
-    S2.state[778] = { mark = false, refs = { { id = 3 } } }
+    local function z(id) return { getOnlineID = function() return id end, isDead = function() return false end } end
+    local boss, plain = { id = 1, z = z(1) }, { id = 2, z = z(2) }
+    local gone = { id = 4, z = z(9) } -- unloaded: its id now belongs to another zombie
+    S2.state[777] = { mark = true, boss = boss, refs = { boss, plain, gone } }
+    S2.state[778] = { mark = false, refs = { { id = 3, z = z(3) } } }
     local m = S2.marks()
     check("boss", m.boss[1], 1)
     check("plain", m.ids[1], 2)
-    check("unmarked run left out", #m.ids + #m.boss, 2)
+    check("unmarked and unloaded left out", #m.ids + #m.boss, 2)
     S2.state[777], S2.state[778] = nil, nil
 end)
 
@@ -5053,7 +5044,7 @@ t("siege: a beaten zombie wave offers no targets in regroup, so nobody leaving c
     local realNear = Sp.playerNear
     Sp.playerNear = function() return false end
     local run = { id = 930, eventId = "siege", state = "active", title = "S", x = 1, y = 1, elapsed = 0, lastSeen = now, placed = true,
-        options = { title = "S", leaveMinutes = 1, waves = 3 }, data = { phase = "regroup", wave = 1, waveType = "zombies" } }
+        options = { title = "S", waves = 3 }, data = { phase = "regroup", wave = 1, waveType = "zombies" } }
     Store.world.runs["930"] = run
     Ho.state[930] = { refs = {}, left = 0, want = 5 }
     check("regroup: no points", S2.remaining(run), nil)
@@ -5064,12 +5055,11 @@ t("siege: a beaten zombie wave offers no targets in regroup, so nobody leaving c
     check("attacking: points", type(S2.remaining(run)), "table")
     -- restart in the last zombie wave: Horde.state is gone; no NPC fallback, so away cannot fail it on a stale count
     Ho.state[930] = nil
-    run.data.wave, run.lastCount = 3, 15
+    run.data.wave = 3
     check("restarted last zombie wave: no points", S2.remaining(run), nil)
     check("restarted last zombie wave: not away", R.away(run), false)
     run.data.waveType = "npc"
     check("NPC last wave still counts its NPCs", type(S2.remaining(run)), "table")
-    run.lastCount = nil
     Sp.playerNear = realNear
     freshWorld()
 end)
@@ -5231,6 +5221,36 @@ t("crash fire: guarded and capped like a wildfire, never on the crate, and no sc
     for _ = 1, 60 do W.slice() end
     check("no scan once the fire is out", upper, 0)
     getCell, instanceof, SEM.Safety.zones, SEM.Safety.isProtected = realCell, realInst, realZones, realProt
+    freshWorld()
+end)
+
+t("zombie ledger: unloaded is alive, killed is dead", function()
+    freshWorld()
+    local Sp, H = SEM.Spawn, SEM.Events.horde
+    local run = { id = 970, eventId = "horde", state = "active", placed = true, x = 5, y = 5, elapsed = 0, lastSeen = now,
+        options = { pulseInterval = 15 }, data = { target = { x = 50, y = 50, name = "t" }, spawned = 2, want = 2 } }
+    Store.world.runs["970"] = run
+    local function zed(pid) return { getPersistentOutfitID = function() return pid end, getOnlineID = function() return -1 end,
+        isDead = function() return false end } end
+    local a, b = { id = 1, z = zed(32768 + 5) }, { id = 2, z = zed(6) }
+    Sp.track(run, a); Sp.track(run, b)
+    check("bit 15 cleared", a.pid, "5")
+    check("body gone: still alive", Sp.alive(a), true)
+    check("body gone: not loaded", Sp.loaded(a), false)
+    local refs = { a, b }
+    check("survey keeps unloaded living", Sp.survey(refs), 2)
+    Sp.killed(zed(5))
+    check("killed: dead", Sp.alive(a), false)
+    check("survey drops killed", Sp.survey(refs), 1)
+    check("survey in place", #refs, 1)
+    -- a restart lost the horde's state: update rebuilds it from the ledger instead of ending
+    H.state[970] = nil
+    check("rebuilt, not all dead", H.update(run), false)
+    check("state restored", H.state[970] ~= nil and #H.state[970].refs, 1)
+    H.state[970] = nil
+    Sp.killed(zed(6))
+    check("all killed: all dead", H.update(run), "all dead")
+    H.state[970] = nil
     freshWorld()
 end)
 

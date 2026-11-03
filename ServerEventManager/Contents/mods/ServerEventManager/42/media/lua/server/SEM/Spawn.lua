@@ -344,10 +344,116 @@ function Spawn.removeCrates(run, why, removeEmpty)
     return note
 end
 
--- ref = { id = onlineID, z = zombie } as kept by events that track their zombies; ids are reused, so both must match
-function Spawn.alive(ref)
+-- ref = { id = onlineID, z = zombie } as kept by events that track their zombies; ids are reused, so both must match. True only
+-- while that very object is loaded and alive: an unloaded zombie fails this too, so it never decides that one is dead.
+function Spawn.loaded(ref)
     local ok, v = pcall(function() return ref.z:getOnlineID() == ref.id and not ref.z:isDead() end)
     return ok and v
+end
+
+-- ---- zombie ledger: an event's zombies outlive unloads, a paused server and restarts (Josh 2026-11-03) ----
+-- B42's population virtualizer keeps only a zombie's persistent outfit id (and a few flags) when it unloads; modData is lost
+-- (seen in the Blackout Predators mod, which binds its zombies the same way). So each event zombie is kept in its run's saved
+-- data by that id: run.data.zs[pid] = true while alive, false once the game reports it killed (OnZombieDead). Unloading never
+-- counts as dying. A zombie the game removes without a death stays "alive" until the run's duration ends it.
+
+-- the id that names a zombie across reloads and restarts: getPersistentOutfitID with bit 15 (the hat-fallen flag) cleared, as
+-- text (a ledger key); nil when the game gives none
+function Spawn.pidOf(z)
+    local ok, raw = pcall(function() return tonumber(z:getPersistentOutfitID()) end)
+    if not ok or not raw or raw == 0 or raw ~= math.floor(raw) then return nil end
+    if raw % 65536 >= 32768 then raw = raw - 32768 end
+    return string.format("%d", raw)
+end
+
+-- puts a freshly spawned zombie's ref in its run's ledger; a stand-in run (already ended) keeps none
+function Spawn.track(run, ref)
+    ref.runId = run.id
+    if run.standIn or not run.data then return end
+    local pid = Spawn.pidOf(ref.z)
+    if not pid then return end
+    ref.pid = pid
+    run.data.zs = run.data.zs or {}
+    run.data.zs[pid] = true
+end
+
+local function ledgerOf(runId)
+    local w = SEM.Store and SEM.Store.world
+    local run = w and w.runs[tostring(runId)]
+    return run and type(run.data) == "table" and run.data.zs
+end
+
+-- alive for counting: a ledger zombie until it is killed, loaded or not; anything else (no persistent id) only while loaded
+function Spawn.alive(ref)
+    local zs = ref.pid and ledgerOf(ref.runId)
+    if zs and zs[ref.pid] ~= nil then return zs[ref.pid] == true end
+    return Spawn.loaded(ref)
+end
+
+-- Pure. alive and total in a ledger
+function Spawn.ledgerCount(zs)
+    local alive, total = 0, 0
+    for _, v in pairs(zs or {}) do
+        total = total + 1
+        if v == true then alive = alive + 1 end
+    end
+    return alive, total
+end
+
+-- the refs of a run's living ledger zombies, not yet bound to a body (Spawn.rebind finds them), and the ledger's total; used
+-- when a restart has lost an event's in-memory list. nil when the run has no ledger
+function Spawn.ledgerRefs(run)
+    local zs = run.data and run.data.zs
+    if not zs then return nil end
+    local refs = {}
+    for pid, v in pairs(zs) do if v == true then refs[#refs + 1] = { pid = pid, runId = run.id } end end
+    table.sort(refs, function(a, b) return a.pid < b.pid end)
+    local _, total = Spawn.ledgerCount(zs)
+    return refs, total
+end
+
+-- the game reports a kill: the zombie's ledger entry, in whichever live run holds it, is marked dead
+function Spawn.killed(z)
+    local pid = Spawn.pidOf(z)
+    local w = SEM.Store and SEM.Store.world
+    if not (pid and w) then return end
+    for _, run in pairs(w.runs) do
+        local zs = type(run) == "table" and type(run.data) == "table" and run.data.zs
+        if zs and zs[pid] == true then zs[pid] = false return end
+    end
+end
+Spawn.hook("OnZombieDead", function(z) pcall(Spawn.killed, z) end)
+
+-- living refs whose body unloaded are bound again to the zombie that now carries their id, found among the loaded zombies, and
+-- tagged again for the arrows. At most once every 2 seconds per run; returns nothing
+local lastRebind = {}
+function Spawn.rebind(refs)
+    local first = refs and refs[1]
+    if not first then return end
+    local key, now = tostring(first.runId), getTimestampMs()
+    if lastRebind[key] and now - lastRebind[key] < 2000 then return end
+    lastRebind[key] = now
+    local need = {}
+    for _, r in ipairs(refs) do
+        if r.pid and Spawn.alive(r) and not Spawn.loaded(r) then need[r.pid] = r end
+    end
+    if SEM.empty(need) then return end
+    local ok, list = pcall(function() return getCell():getZombieList() end)
+    if not (ok and list) then return end
+    local w = SEM.Store and SEM.Store.world
+    for i = 0, list:size() - 1 do
+        local z = list:get(i)
+        local pid = Spawn.pidOf(z)
+        local r = pid and need[pid]
+        if r then
+            local okId, id = pcall(function() return not z:isDead() and z:getOnlineID() end)
+            if okId and id then
+                r.z, r.id, need[pid] = z, id, nil
+                local run = w and w.runs[tostring(r.runId)]
+                if run then Spawn.tag(run, z, id, r.kind or "HostileZombie") end
+            end
+        end
+    end
 end
 
 -- ---- SEMType: what the mod spawned for a live event, as modData.SEMType and a list for clients ----
@@ -401,7 +507,7 @@ end
 -- drops dead zombies; true when clients need a new list, also when an NPC's body has changed
 function Spawn.tagsDue()
     local drop = {}
-    for id, t in pairs(tags) do if not Spawn.alive(t) then drop[#drop + 1] = id end end
+    for id, t in pairs(tags) do if not Spawn.loaded(t) then drop[#drop + 1] = id end end -- arrows follow loaded bodies only
     for _, id in ipairs(drop) do tags[id], tagsDirty = nil, true end
     local l, ids = Spawn.tagLists(), {}
     for _, id in ipairs(l.HostileNpc) do ids[#ids + 1] = id end
@@ -413,13 +519,24 @@ function Spawn.tagsDue()
     return due
 end
 
--- { x, y } of every living zombie in refs, for the direction arrows
+-- { x, y } of every living zombie in refs that is loaded now, for the direction arrows and Runner.away
 function Spawn.refPoints(refs)
+    Spawn.rebind(refs)
     local out = {}
     for _, e in ipairs(refs or {}) do
-        if Spawn.alive(e) then out[#out + 1] = { x = e.z:getX(), y = e.z:getY() } end
+        if Spawn.alive(e) and Spawn.loaded(e) then out[#out + 1] = { x = e.z:getX(), y = e.z:getY() } end
     end
     return out
+end
+
+-- Shared survey for events that count zombies: rebinds, drops the killed, keeps the unloaded living. Returns the living count
+function Spawn.survey(refs)
+    Spawn.rebind(refs)
+    local keep = {}
+    for _, e in ipairs(refs) do if Spawn.alive(e) then keep[#keep + 1] = e end end
+    for i = #refs, 1, -1 do refs[i] = nil end
+    for i, e in ipairs(keep) do refs[i] = e end
+    return #keep
 end
 
 -- true when the outfit name is a real one. getAllOutfits is a vanilla global (ISSpawnHordeUI) not yet seen on a server, so a
@@ -522,6 +639,7 @@ local function stepJob(j)
                         -- a stand-in run (Siege overrun, Takeover) has ended already: its tag would never be untagged
                         if not j.run.standIn then Spawn.tag(j.run, z, id, "HostileZombie") end
                         local ref = { id = id, z = z }
+                        Spawn.track(j.run, ref) -- the run's ledger: counted alive until killed, through unloads and restarts
                         if j.refs then j.refs[#j.refs + 1] = ref end
                         if j.per then j.per(ref) end
                     end

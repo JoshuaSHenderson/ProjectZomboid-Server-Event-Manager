@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.2-beta
+
+### Fixed
+
+- Events carry on unchanged through log outs, a paused server and restarts. Zombies are kept by their persistent id and only
+  count as gone when killed: a horde no longer ends as "all dead" when its only player logs out and back in, and zombie events
+  no longer end as "released by a restart".
+- Leaving an event's area only pauses it; it no longer fails as abandoned. Leave Minutes is removed.
+- Markers of running events come back after a re-login (the client asks again until the server answers).
+- Super zombie skins go only to loaded super zombies.
+
 ## 0.3.1-beta
 
 ### Added
