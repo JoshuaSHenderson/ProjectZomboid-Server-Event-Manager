@@ -2,10 +2,15 @@ version=1
 id=3830652321
 title=Server Event Manager [BETA]
 description=[h1]Server Event Manager [BETA][/h1]
-description=[b]This mod is in beta and under active development. Expect bugs.[/b] If something breaks, please tell us: [url=https://github.com/JoshuaSHenderson/ProjectZomboid-Server-Event-Manager/issues]report it on GitHub[/url] or leave a comment here, with what you did and your console.txt if you can.
+description=An in-game admin console for [b]Project Zomboid Build 42 multiplayer servers[/b]. Server admins set up, trigger, schedule and cancel server events (airdrops, aircraft crashes, hostile camps, migrating hordes, wildfires, super zombies, convoy wrecks, base sieges, manhunts and rescue calls) with every option in the game UI. Players get on-screen alerts, sounds and map markers. NPC events use Project A-Life.
 description=
-description=[h2]New in 0.3.0-beta[/h2]
-description=Built from the second live-server list and played on our test server with A-Life and Jeem. Tell us what breaks.
+description=[b]This mod is in beta and under active development. Expect bugs.[/b] If something breaks, [url=https://github.com/JoshuaSHenderson/ProjectZomboid-Server-Event-Manager/issues]report it on GitHub[/url] or comment here, with what you did and your console.txt.
+description=
+description=[h2]New in 0.3.1-beta[/h2]
+description=[b]Export Logs.[/b] Save the event history and notices to a text file in your Zomboid/Lua folder, and copy them to the clipboard.
+description=
+description=[h2]0.3.0-beta[/h2]
+description=Built from the second live-server list and played on our test server with A-Life and Jeem.
 description=[list]
 description=[*][b]Aircraft Crash.[/b] A burning helicopter or plane wreck, real 3D models, on scorched open ground. A loud explosion everyone hears, fires that burn out, loot scattered round the wreck and optional guards.
 description=[*][b]Hold your base.[/b] Under Siege marks the base on the map during the warning and gives you Return Minutes to get home. Miss it and the base is taken over: enemies move in, some loot is gone, fires burn. Waves can be NPCs, zombies or random.
@@ -25,9 +30,6 @@ description=[img]https://raw.githubusercontent.com/JoshuaSHenderson/ProjectZombo
 description=
 description=[img]https://raw.githubusercontent.com/JoshuaSHenderson/ProjectZomboid-Server-Event-Manager/main/docs/screenshots/crash-helicopter.png[/img]
 description=
-description=[h2]Earlier: 0.2.0-beta[/h2]
-description=A new console with one page per event and presets, Under Siege wave by wave, a Pending queue, Import / Export, several packs per event, real forest avoidance, and time left on the Server Events bar.
-description=
 description=[h2]Optional dependencies[/h2]
 description=This mod runs on its own, but everything with NPCs needs these:
 description=[list]
@@ -35,8 +37,6 @@ description=[*][url=https://steamcommunity.com/sharedfiles/filedetails/?id=38039
 description=[*][url=https://steamcommunity.com/sharedfiles/filedetails/?id=3806944055]Project A-Life - Jeem Extension[/url] - adds Jeem bases as targets and protected zones, and faction standing for the stranger's reward.
 description=[/list]
 description=Without A-Life, guards and camps use zombies, Under Siege runs zombie waves (Wave Type Zombies or Random), and Stranger Calls For Help and Hunted fail.
-description=
-description=An in-game admin console for Build 42 multiplayer servers. Set up, force, schedule and cancel server events, with every option in the UI.
 description=
 description=[img]https://raw.githubusercontent.com/JoshuaSHenderson/ProjectZomboid-Server-Event-Manager/main/docs/screenshots/home.png[/img]
 description=
@@ -60,7 +60,7 @@ description=[*]Open with F7, the right-click menu or the Admin Panel. Admins onl
 description=[*]Every option has a hover blurb. Save named presets per event.
 description=[*]Table pickers for items, vehicles, outfits, players and bases, modded ones included.
 description=[*]Loot Packs, Vehicle Packs and Weapon Packs, with defaults ready to go. Loot packs have a tier, and an event can pick Random Low, Medium or High Tier.
-description=[*]Active Events lists every live run with Cancel and Teleport. Logs show what fired and why.
+description=[*]Active Events lists every live run with Cancel and Teleport. Logs show what fired and why; Export saves them to a file.
 description=[*]Limits cap zombies per event and events at once.
 description=[*]Import / Export the whole config as JSON.
 description=[*]Several loot, vehicle or weapon packs per event.

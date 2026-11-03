@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1-beta
+
+### Added
+
+- Export Logs: a button on the Logs pane saves the event history and notices to a text file in Zomboid/Lua and copies them.
+
 ## 0.3.0-beta
 
 Built from the second live-server list and played on the test server with A-Life and Jeem.

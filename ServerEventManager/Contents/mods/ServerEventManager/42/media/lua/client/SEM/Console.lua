@@ -157,7 +157,13 @@ function Console:initialise()
     -- right side: Active Events above Logs, each its own scroller, split about 50/50 (positions in layout)
     self.active = SEM.Feed.new(0, 0, FEED - 12, 40, "active")
     self.logs = SEM.Feed.new(0, 0, FEED - 12, 40, "logs")
-    for _, c in ipairs({ self.closeBtn, self.copyBtn, self.pasteBtn, self.reloadBtn, self.saveBtn, self.saveAsBtn, self.dupBtn, self.cancelBtn, self.delBtn, self.forceBtn, self.active, self.logs }) do self:addChild(c) end
+    self.exportBtn = T.btn("Export", 0, 0, 0, self, function()
+        local name, why = SEM.Feed.export()
+        if name then SEM.Net.line("Logs saved to Zomboid/Lua/" .. name .. " and copied to the clipboard")
+        else SEM.Net.line("Export failed: " .. tostring(why), true) end
+    end)
+    self.exportBtn:setTooltip("Saves the event history and notices to a text file in your Zomboid/Lua folder and copies them to the clipboard.")
+    for _, c in ipairs({ self.closeBtn, self.copyBtn, self.pasteBtn, self.reloadBtn, self.saveBtn, self.saveAsBtn, self.dupBtn, self.cancelBtn, self.delBtn, self.forceBtn, self.active, self.logs, self.exportBtn }) do self:addChild(c) end
     T.grip(self, MINW, MINH)
     self:layout()
     self:syncDrafts()
@@ -196,6 +202,8 @@ function Console:layout()
     self.forceBtn:setX(w - FEED - 16 - self.forceBtn:getWidth())
     local half, off = math.floor((h - HDR - 16) / 2), math.max(20, T.fh() + 6)
     self.paneTop, self.paneHalf = HDR + 8, half
+    self.exportBtn:setX(w - 16 - self.exportBtn:getWidth()) -- on the Logs heading's row, right side
+    self.exportBtn:setY(math.max(self.paneTop + half - 2, self.paneTop + half + math.floor((T.fh() - BH) / 2)))
     for i, p in ipairs({ self.active, self.logs }) do -- the Logs pane ends 6 higher so the corner grip stays clear
         p:setX(w - FEED + 6)
         p:setY(self.paneTop + off + (i - 1) * half)

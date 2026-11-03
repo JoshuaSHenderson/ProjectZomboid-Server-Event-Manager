@@ -3,7 +3,7 @@
 Project Zomboid Build 42 mod for multiplayer servers. It gives server admins an in-game console to set up,
 force, schedule and cancel server events: airdrops, hostile camps, migrating hordes, wildfires, super zombies, convoy
 wrecks, sieges, manhunts, rescue calls and aircraft crashes. Players get on-screen alerts, a sound and map markers. Mod id
-`ServerEventManager`, author JoshuaSHenderson, version 0.3.0-beta.
+`ServerEventManager`, author JoshuaSHenderson, version 0.3.1-beta.
 
 > **Beta, under active development. Expect bugs.** If you hit one, please
 > [open an issue](https://github.com/JoshuaSHenderson/ProjectZomboid-Server-Event-Manager/issues) with what you did and your `console.txt`.
@@ -99,6 +99,9 @@ logged on the server.
   - Active Events lists each live run with Cancel, a line or two of detail, and **Teleport**, which sends the
     chat command `/teleportto x,y,0` to the run's site.
   - Logs show notices, then history, newest first: fired, ended, cancelled, failed, and schedule skips with a reason.
+  - **Export** (on the Logs heading) saves the history, with UTC times and sites, and this session's notices to
+    `Zomboid/Lua/SEM_logs_<date>_<time>.txt` on your own computer, and copies the same text to the clipboard. The server
+    keeps the last 50 history entries.
 - **Header:** the server clock (marked SERVER once the server has sent it), with your own local time beside it as YOURS.
   Real-World windows use the server clock.
 - **Presets:** on each event page. **Save As** keeps the page's current options under a new name, **Update** saves

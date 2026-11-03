@@ -1215,6 +1215,20 @@ t("siege shows its base on the map during the warning", function()
     SEM.Targets.bases, SEM.Spawn.playerNear = realBases, realNear
 end)
 
+t("export logs as text", function()
+    local hist = { { eventId = "airdrop", state = "pending", title = "Drop", at = 1, x = 10.6, y = 20.2 },
+        { eventId = "crash", state = "failed", reason = "no clear field", title = "Crash", schedule = "Night", at = 2 } }
+    local text = SEM.Fmt.logExport(hist, { { text = "Saved" }, { text = "boom", bad = true } }, { airdrop = "Airdrop", crash = "Aircraft Crash" },
+        function(at) return "T" .. at end, "HEAD")
+    local lines = {}
+    for l in text:gmatch("([^\n]*)\n") do lines[#lines + 1] = l end
+    check("header", lines[1], "HEAD")
+    check("newest first", lines[4], "T2  Night: Aircraft Crash FAILED - no clear field")
+    check("site", lines[5], "T1  Airdrop PENDING @ 10,20")
+    check("notices", lines[8] .. "|" .. lines[9], "  Saved|! boom")
+    check("empty", SEM.Fmt.logExport({}, {}, {}, tostring, "H"):find("(none)", 1, true) ~= nil, true)
+end)
+
 t("crash scorch chance falls off past the footprint", function()
     local K = SEM.Events.crash
     check("core", K.scorchChance(0, 10), 92)

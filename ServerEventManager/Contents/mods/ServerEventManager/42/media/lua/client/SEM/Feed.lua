@@ -116,6 +116,24 @@ local function drawLogs(v)
     if y ~= v.lastH then v.lastH = y; v:setScrollHeight(y + 8) end
 end
 
+-- Export Logs: the Logs pane as a text file in Zomboid/Lua (the only folder Lua may write) and on the clipboard. Returns the
+-- file name, or nil and why.
+function Feed.export()
+    local stamp = function(at) return os.date("!%Y-%m-%d %H:%M:%S", at) .. " UTC" end
+    local now = os.time()
+    local text = F.logExport((SEM.Net.snapshot or {}).history, SEM.Net.lines, titles(), stamp,
+        "Server Event Manager logs, exported " .. stamp(now))
+    local name = "SEM_logs_" .. os.date("!%Y%m%d_%H%M%S", now) .. ".txt"
+    local ok, err = pcall(function()
+        local w = getFileWriter(name, true, false)
+        w:write(text)
+        w:close()
+    end)
+    pcall(function() Clipboard.setClipboard(text) end)
+    if not ok then return nil, tostring(err) end
+    return name
+end
+
 -- kind: "active" (live runs) or "logs" (notices and history)
 function Feed.new(x, y, w, h, kind)
     local v = T.scroller(x, y, w, h)

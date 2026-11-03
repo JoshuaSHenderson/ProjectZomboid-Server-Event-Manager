@@ -142,6 +142,28 @@ function Fmt.entryText(e, titles)
     return title .. " " .. s .. (why and (" - " .. tostring(why)) or "")
 end
 
+-- Pure. The Logs pane as plain text for Export Logs: a header, the server history newest first (each with its UTC time and site
+-- when it has them) and this session's notices. history = snapshot.history, lines = Net.lines (newest first), stamp(at) gives
+-- the time text, header = first line.
+function Fmt.logExport(history, lines, titles, stamp, header)
+    local out = { header, "", "Event history (newest first, the server keeps the last 50):" }
+    local n = 0
+    for i = #(history or {}), 1, -1 do
+        local e = history[i]
+        if type(e) == "table" then
+            n = n + 1
+            local site = e.x and (" @ " .. math.floor(e.x) .. "," .. math.floor(e.y)) or ""
+            out[#out + 1] = (e.at and (stamp(e.at) .. "  ") or "") .. Fmt.entryText(e, titles) .. site
+        end
+    end
+    if n == 0 then out[#out + 1] = "(none)" end
+    out[#out + 1] = ""
+    out[#out + 1] = "Console notices this session (newest first):"
+    for _, l in ipairs(lines or {}) do out[#out + 1] = (l.bad and "! " or "  ") .. tostring(l.text) end
+    if #(lines or {}) == 0 then out[#out + 1] = "(none)" end
+    return table.concat(out, "\n") .. "\n"
+end
+
 -- detail lines for a live run; now is os.time(), px and py the viewer's position or nil
 function Fmt.runDetail(r, now, px, py)
     local out = {}

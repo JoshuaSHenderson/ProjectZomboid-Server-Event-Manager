@@ -1,7 +1,7 @@
 name=Server Event Manager
 id=ServerEventManager
 author=JoshuaSHenderson
-modversion=0.3.0-beta
+modversion=0.3.1-beta
 versionMin=42.21.0
 loadModAfter=\ProjectALifeNPCs
-description=BETA, active work in progress: expect bugs. In-game admin console for manual and scheduled server events: airdrops, aircraft crashes, camps, hordes, wildfires, convoys, sieges, manhunts and more. Weapon packs for A-Life NPCs.
+description=In-game admin console for Project Zomboid Build 42 multiplayer servers: set up, trigger and schedule server events (airdrops, aircraft crashes, camps, hordes, wildfires, convoys, sieges, manhunts and more). Weapon packs for A-Life NPCs. BETA, active work in progress: expect bugs.

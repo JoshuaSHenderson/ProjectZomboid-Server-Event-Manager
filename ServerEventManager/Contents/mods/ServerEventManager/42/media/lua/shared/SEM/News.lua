@@ -2,8 +2,9 @@
 SEM = SEM or {}
 
 SEM.News = {
-    version = "0.3.0-beta", -- keep equal to modversion in both mod.info files
+    version = "0.3.1-beta", -- keep equal to modversion in both mod.info files
     lines = {
+        "0.3.1-beta: Export Logs saves the event history to a text file and copies it to the clipboard.",
         "New event: Aircraft Crash. A burning helicopter or plane wreck on open ground, loot scattered round it, fires and an explosion everyone hears.",
         "Under Siege: get back to your base in time or it is taken over. Waves can be NPCs, zombies or random, seconds apart.",
         "Show Notifications on every event, a Once After Game Hours schedule for testing, and Under Siege marks the base during the warning.",
