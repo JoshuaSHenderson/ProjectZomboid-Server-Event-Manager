@@ -576,6 +576,15 @@ All code in this mod was written from scratch. No code is taken from other mods.
 read for patterns only, and PhunSprinters 2 as documentation. Thanks to the authors of Project A-Life and the Jeem
 Extension, whose mods this one integrates with.
 
+Third-party assets (also listed in the mod's `CREDITS.txt`):
+
+- Plane wreck: ["Low poly - crashed plane"](https://sketchfab.com/3d-models/low-poly-crashed-plane-c582b66103094290ac51875e71a0a2a9) by [lesmanthDev](https://sketchfab.com/lesmanthDev), licensed under
+  [CC Attribution 4.0](https://creativecommons.org/licenses/by/4.0/). Changed: one part kept, turned, re-centred, reduced and exported for Project Zomboid.
+- Helicopter wreck: ["Crashed Helicopter"](https://sketchfab.com/3d-models/crashed-helicopter-2fef5ddeec6f4f1d8fdd9a2f6e18a4c3) by [rayleighsyafiq](https://sketchfab.com/rayleighsyafiq), licensed under
+  [CC Attribution 4.0](https://creativecommons.org/licenses/by/4.0/). Changed: parts joined, reduced, textures combined and brightened, exported for Project Zomboid.
+- Crash explosion: ["Loud Explosion"](https://pixabay.com/sound-effects/loud-explosion-425457/) by [DRAGON-STUDIO](https://pixabay.com/users/dragon-studio-38165424/), under the
+  [Pixabay Content License](https://pixabay.com/service/license-summary/). Converted to Ogg.
+
 ## License
 
 No license has been chosen yet, so all rights are reserved for now. Ask before reusing the code.

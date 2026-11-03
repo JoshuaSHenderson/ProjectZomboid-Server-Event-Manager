@@ -1,0 +1,19 @@
+Server Event Manager - third-party assets
+
+"Low poly - crashed plane" by lesmanthDev
+  https://sketchfab.com/3d-models/low-poly-crashed-plane-c582b66103094290ac51875e71a0a2a9
+  Licensed under CC Attribution 4.0 (https://creativecommons.org/licenses/by/4.0/)
+  Changed: one part kept, turned, re-centred, reduced to 6000 triangles and exported for Project Zomboid.
+  Used as media/models_X/vehicles/SEM_CrashPlane.fbx and media/textures/Vehicles/SEM_CrashPlane.png.
+
+"Crashed Helicopter" by rayleighsyafiq
+  https://sketchfab.com/3d-models/crashed-helicopter-2fef5ddeec6f4f1d8fdd9a2f6e18a4c3
+  Licensed under CC Attribution 4.0 (https://creativecommons.org/licenses/by/4.0/)
+  Changed: parts joined into one mesh, reduced to 12000 triangles, textures combined into one and brightened,
+  exported for Project Zomboid.
+  Used as media/models_X/vehicles/SEM_CrashHeli.fbx and media/textures/Vehicles/SEM_CrashHeli.png.
+
+"Loud Explosion" by DRAGON-STUDIO
+  https://pixabay.com/sound-effects/loud-explosion-425457/
+  Pixabay Content License (https://pixabay.com/service/license-summary/)
+  Changed: converted to Ogg Vorbis. Used as media/sound/SEM_CrashBoom.ogg.

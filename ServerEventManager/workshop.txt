@@ -96,6 +96,13 @@ description=[*]Wildfire protects safehouses, Jeem bases and A-Life homes. It can
 description=[*]NPCs spawned by A-Life stay in the world when an event ends.
 description=[/list]
 description=
+description=[h2]Credits[/h2]
+description=[list]
+description=[*]Plane wreck: [url=https://sketchfab.com/3d-models/low-poly-crashed-plane-c582b66103094290ac51875e71a0a2a9]"Low poly - crashed plane"[/url] by lesmanthDev, [url=https://creativecommons.org/licenses/by/4.0/]CC BY 4.0[/url]. Reduced and converted for Project Zomboid.
+description=[*]Helicopter wreck: [url=https://sketchfab.com/3d-models/crashed-helicopter-2fef5ddeec6f4f1d8fdd9a2f6e18a4c3]"Crashed Helicopter"[/url] by rayleighsyafiq, [url=https://creativecommons.org/licenses/by/4.0/]CC BY 4.0[/url]. Joined, reduced and converted for Project Zomboid.
+description=[*]Crash explosion: [url=https://pixabay.com/sound-effects/loud-explosion-425457/]"Loud Explosion"[/url] by DRAGON-STUDIO, Pixabay Content License.
+description=[/list]
+description=
 description=Source, docs and issues: [url=https://github.com/JoshuaSHenderson/ProjectZomboid-Server-Event-Manager]GitHub[/url]
 tags=Build 42;Multiplayer;Misc
 visibility=public

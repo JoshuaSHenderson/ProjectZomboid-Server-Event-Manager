@@ -96,8 +96,8 @@ function Alerts.flyover(args)
     Alerts.flyovers[args.id] = { snd = p:playSoundLocal(SOUND), em = p:getEmitter(), born = getTimestampMs() }
 end
 
--- Aircraft Crash going active: one loud explosion for every player (radio rule as the flyover). Josh's sound, from
--- docs/sounds (converted to ogg; scripts/ServerEventManager/sounds_sem.txt)
+-- Aircraft Crash going active: one loud explosion for every player (radio rule as the flyover). "Loud Explosion" by
+-- DRAGON-STUDIO, https://pixabay.com/sound-effects/loud-explosion-425457/ (Pixabay Content License), converted to ogg; see CREDITS.txt
 function Alerts.boom(args)
     local p = getPlayer()
     if not p or (args.radio and not Alerts.hasRadio(p)) then return end

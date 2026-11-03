@@ -7,7 +7,8 @@
 #   rotate=<degrees about the up axis, applied first>  brighten=<target mean 0-255, 0 = off>  size=<texture px, 1024>
 #   shift=<x>,<y> metres from the bounding-box centre to the new origin: put the origin on the main body, because the
 #   vehicle's collision box is centred on the origin (the plane's body is off-centre among its scattered pieces)
-# Commands used for the shipped wrecks: see the header of media/scripts/ServerEventManager/vehicles_sem_crash.txt.
+# Commands used for the shipped wrecks, and the models' sources and licenses (CC BY 4.0, credit required): see the header
+# of media/scripts/ServerEventManager/vehicles_sem_crash.txt and the mod's CREDITS.txt.
 # The mesh is centred on its bounding box, triangulated and written with the axis turn baked into the vertices
 # (a rotation left on the file's nodes made it invisible in game). The baked export writes Blender metres as centimetres;
 # the model script's scale = 0.01 brings them back to metres. Do not scale the mesh here (that made the wrecks 100x too big).

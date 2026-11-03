@@ -13,6 +13,8 @@ Built from the second live-server list and played on the test server with A-Life
 - Show Notifications (every event): off runs the event without on-screen notices; marker and Server Events bar unchanged.
 - Scheduler mode Once, After Game Hours: fires one time after 1 to 72 game hours, then turns the entry off. For testing a schedule.
 - Under Siege shows its base on the map during the warning (Lead Minutes), so players can check whose base it is.
+- CREDITS.txt: the crash wreck models ("Low poly - crashed plane" by lesmanthDev, "Crashed Helicopter" by rayleighsyafiq,
+  CC BY 4.0) and the explosion sound ("Loud Explosion" by DRAGON-STUDIO, Pixabay Content License).
 - Weapon Packs page: named sets of weapons (modded ones included) with an ammo count. Pick one or more on any event with
   hostile NPCs (guards, Hostile Camp, Under Siege waves and takeovers, Hunted) and every NPC spawns with one gun and one
   melee weapon from the pack. Starts with Handguns, Shotguns, Hunters, Military and Melee Only.

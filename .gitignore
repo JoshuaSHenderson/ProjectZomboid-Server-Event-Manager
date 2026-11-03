@@ -14,5 +14,5 @@ __pycache__/
 PROJECT-PLAN.md
 docs/*
 !docs/screenshots/
-brag-output/
+brag-output*/
 docs/screenshots/20*

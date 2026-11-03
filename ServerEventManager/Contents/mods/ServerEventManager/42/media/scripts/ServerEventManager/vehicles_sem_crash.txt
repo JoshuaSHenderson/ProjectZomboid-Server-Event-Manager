@@ -14,6 +14,10 @@
    model offset y = half the mesh height (the mesh is centred on the origin; this stands it on the ground).
    centerOfMassOffset y = half the collision box height (the box stands on the ground too).
 
+   Sources (CC Attribution 4.0, https://creativecommons.org/licenses/by/4.0/; see CREDITS.txt in the mod folder):
+     plane: "Low poly - crashed plane" by lesmanthDev, https://sketchfab.com/3d-models/low-poly-crashed-plane-c582b66103094290ac51875e71a0a2a9
+     helicopter: "Crashed Helicopter" by rayleighsyafiq, https://sketchfab.com/3d-models/crashed-helicopter-2fef5ddeec6f4f1d8fdd9a2f6e18a4c3
+
    Meshes, from Josh's models in docs/3dModels (Blender 3.6):
      blender -b --python tools/convert-model.py -- src="<Crashed helicopter.glb>" out=<...>/SEM_CrashHeli.fbx
        tex=<...>/SEM_CrashHeli.png keep=ALL imgs=Image_0,Image_4,Image_8 tris=12000 brighten=76
