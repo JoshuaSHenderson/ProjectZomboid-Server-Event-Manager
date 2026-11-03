@@ -61,7 +61,7 @@ local function entries()
     return out
 end
 
-local function isGame(entry) return entry.schedule.mode == "randomGame" or entry.schedule.mode == "scheduledGame" end
+local function isGame(entry) local m = entry.schedule.mode return m == "randomGame" or m == "scheduledGame" or m == "onceGame" end
 
 local function stamp(now) return Fmt.DAYS[now.dow] .. string.format(" %02d:%02d", now.hour, now.minute) end
 local function gameStamp(h) return string.format("Day %d %02d:00", math.floor(h / 24) + 1, math.floor(h % 24)) end
@@ -75,6 +75,7 @@ end
 
 -- the options this entry runs with: false = the event page's saved options, table = a preset's, nil + reason = cannot run
 local function resolveOptions(entry)
+    if not SEM.Events[entry.eventId] then return nil, "event mod not loaded" end -- D55
     if entry.preset == "" then return false end
     local p = Store.config.presets[entry.preset]
     if not p then return nil, "preset '" .. entry.preset .. "' no longer exists" end
@@ -125,6 +126,7 @@ end
 -- first slot after enabling
 local function rollFirst(entry, hours)
     local sc = entry.schedule
+    if sc.mode == "onceGame" then return hours + (sc.afterHours or 1) end
     if sc.mode == "scheduledGame" then return S.nextScheduledHour(hours, sc.everyDays, sc.atHour) end
     return math.max(hours + sc.firstDelayDays * 24, S.nextGameHour(hours, sc.minDays, sc.maxDays, Scheduler.rng))
 end
@@ -139,7 +141,9 @@ end
 function Scheduler.refresh(entry, now)
     local nextGame = Store.world.nextGameHour
     local text = "Off"
-    if entry.enabled and entry.schedule.mode == "real" then
+    if not SEM.Events[entry.eventId] then
+        text = "event mod not loaded"
+    elseif entry.enabled and entry.schedule.mode == "real" then
         now = now or Scheduler.clock()
         text = now and realNext(entry, now) or "Unknown"
     elseif entry.enabled and isGame(entry) then
@@ -256,7 +260,12 @@ function Scheduler.gameTick()
                         Runner.logSkip(entry.eventId, entry.name, why)
                         dirty = put(entry, "last", "skipped " .. label) or dirty
                     end
-                    world.nextGameHour[entry.id] = rollNext(entry, hours)
+                    if sc.mode == "onceGame" then -- fired (or skipped) its one slot: the entry turns itself off
+                        entry.enabled = false
+                        world.nextGameHour[entry.id] = nil
+                    else
+                        world.nextGameHour[entry.id] = rollNext(entry, hours)
+                    end
                 end
             end
         end

@@ -21,8 +21,8 @@ Store.limitsSchema = {
 }
 
 local scheduleSchema = {
-    { key = "mode", type = "enum", choices = { "off", "randomGame", "scheduledGame", "real" }, default = "off",
-      help = "When the event fires by itself. Off means only Force Now. Pick one mode; they never run together." },
+    { key = "mode", type = "enum", choices = { "off", "randomGame", "scheduledGame", "real", "onceGame" }, default = "off",
+      help = "When the event fires by itself. Off means only Force Now. Once, After Game Hours fires one time and then turns the entry off, handy for testing a schedule. Pick one mode; they never run together." },
     { key = "minDays", type = "int", min = 0, max = 60, default = 1,
       help = "Shortest wait between runs, in game days. 1 to 3 days feels regular." },
     { key = "maxDays", type = "int", min = 0, max = 60, default = 3,
@@ -37,6 +37,8 @@ local scheduleSchema = {
       help = "Runs once every this many game days. 7 is weekly." },
     { key = "atHour", type = "int", min = 0, max = 23, default = 20,
       help = "Game hour of day the run starts, 0 to 23. 20 is 8 pm in game." },
+    { key = "afterHours", type = "int", min = 1, max = 72, default = 1,
+      help = "Game hours from saving or enabling the entry until it fires, once. 1 is about 2 to 3 real minutes at default speed." },
 }
 Store.scheduleSchema = scheduleSchema
 
@@ -118,8 +120,10 @@ local PACK_FIELDS = { { key = "vehicles", type = "vehicleList", default = {} } }
 local LOOT_FIELDS = { { key = "items", type = "lootTable", default = {} }, { key = "picks", type = "int", min = 0, max = 20, default = 0 },
     { key = "tier", type = "enum", choices = { "low", "medium", "high" }, default = "medium" } }
 
--- packs: a list of { name, vehicles }, or with loot true { name, items, picks }. "random" is reserved, the options use it.
--- Returns ok, packs, errors
+local WEAPON_FIELDS = { { key = "weapons", type = "weaponList", default = {} }, { key = "ammo", type = "int", min = 0, max = 500, default = 60 } }
+
+-- packs: a list of { name, vehicles }, with loot true { name, items, picks, tier }, with loot "weapon" { name, weapons, ammo }.
+-- "random" is reserved, the options use it. Returns ok, packs, errors
 function Store.validatePacks(raw, loot)
     if raw == nil then return true, {}, {} end -- an empty list arrives as nil
     if type(raw) ~= "table" or #raw > C.MAX_PACKS then return false, nil, { _ = "at most " .. C.MAX_PACKS .. " packs" } end
@@ -130,12 +134,15 @@ function Store.validatePacks(raw, loot)
         elseif seen[n] then errs["pack" .. i] = "another pack has this name"
         else
             seen[n] = true
-            local ok, clean, e = O.validate(loot and LOOT_FIELDS or PACK_FIELDS, loot and { items = p.items, picks = p.picks, tier = p.tier } or { vehicles = p.vehicles })
+            local ok, clean, e
+            if loot == "weapon" then ok, clean, e = O.validate(WEAPON_FIELDS, { weapons = p.weapons, ammo = p.ammo })
+            elseif loot then ok, clean, e = O.validate(LOOT_FIELDS, { items = p.items, picks = p.picks, tier = p.tier })
+            else ok, clean, e = O.validate(PACK_FIELDS, { vehicles = p.vehicles }) end
             if ok then
                 clean.name = n
                 out[i] = clean
             else
-                errs["pack" .. i] = e.items or e.picks or e.tier or e.vehicles
+                errs["pack" .. i] = e.items or e.picks or e.tier or e.vehicles or e.weapons or e.ammo
             end
         end
     end
@@ -162,13 +169,14 @@ end
 
 Store.MAX_SCHEDULES = 50
 
--- one schedule entry from untrusted input; server-written next/last are never taken from it. Returns ok, entry, errors
-function Store.validateEntry(raw, id)
+-- one schedule entry from untrusted input; server-written next/last are never taken from it. anyEvent keeps an entry whose event
+-- is not loaded (D55). Returns ok, entry, errors
+function Store.validateEntry(raw, id, anyEvent)
     local errs = {}
     if type(raw) ~= "table" then return false, nil, { _ = "schedule entry must be a table" } end
     local e = { id = id }
     if validName(raw.name) then e.name = raw.name else errs.name = "must be text, 1 to 40 characters" end
-    if type(raw.eventId) == "string" and SEM.EventDefs.byId[raw.eventId] then e.eventId = raw.eventId else errs.eventId = "unknown event" end
+    if type(raw.eventId) == "string" and (anyEvent or SEM.EventDefs.byId[raw.eventId]) then e.eventId = raw.eventId else errs.eventId = "unknown event" end
     local preset = raw.preset == nil and "" or raw.preset
     if type(preset) == "string" and #preset <= 40 then e.preset = preset else errs.preset = "must be text, at most 40 characters" end
     if type(raw.enabled) == "boolean" then e.enabled = raw.enabled else errs.enabled = "must be true or false" end
@@ -188,7 +196,7 @@ local function normSchedules(raw)
     table.sort(ids)
     for _, id in ipairs(ids) do
         local e = raw[id]
-        local ok, clean = Store.validateEntry(e, id)
+        local ok, clean = Store.validateEntry(e, id, true)
         if ok and n < Store.MAX_SCHEDULES then
             clean.next, clean.last = type(e.next) == "string" and e.next or "", type(e.last) == "string" and e.last or ""
             -- unique names: the first by id keeps its name
@@ -201,7 +209,8 @@ local function normSchedules(raw)
 end
 
 -- one step per schema bump, each run on a config saved before it (no schema means 1). Schema 2: Convoy lost its "none" guard type.
--- Schema 3: lootPack and vehiclePack hold a list of pack names, "" becomes empty.
+-- Schema 3: lootPack and vehiclePack hold a list of pack names, "" becomes empty. Schema 4: Siege waveMinutes became waveSeconds. Schema 6: guardMin and guardMax became guardNpcMin and guardNpcMax.
+-- Schema 5 (D56): Horde targetType keeps location, random, randomTown, randomCountryside and randomPlayer; any other value becomes randomPlayer.
 function Store.migrate(cfg)
     local from = cfg.schema or 1
     local function each(fix)
@@ -223,6 +232,23 @@ function Store.migrate(cfg)
             end
         end)
     end
+    if from < 4 then
+        each(function(o, id)
+            if type(o) == "table" and id == "siege" and type(o.waveMinutes) == "number" then o.waveSeconds, o.waveMinutes = o.waveMinutes * 60, nil end
+        end)
+    end
+    if from < 6 then -- guardMin and guardMax were NPC counts (capped at 10); the zombie pair takes its defaults
+        each(function(o)
+            if type(o) ~= "table" then return end
+            o.guardNpcMin, o.guardNpcMax, o.guardMin, o.guardMax = o.guardMin, o.guardMax, nil, nil
+        end)
+    end
+    if from < 5 then
+        local keep = { location = true, random = true, randomTown = true, randomCountryside = true, randomPlayer = true }
+        each(function(o, id)
+            if type(o) == "table" and id == "horde" and o.targetType ~= nil and not keep[o.targetType] then o.targetType = "randomPlayer" end
+        end)
+    end
 end
 
 local function normConfig(raw)
@@ -230,26 +256,43 @@ local function normConfig(raw)
     Store.migrate(raw)
     local _, packs = Store.validatePacks(raw.vehiclePacks)
     local _, loot = Store.validatePacks(raw.lootPacks, true)
-    packs, loot = packs or {}, loot or {}
+    local _, arms = Store.validatePacks(raw.weaponPacks, "weapon")
+    packs, loot, arms = packs or {}, loot or {}, arms or {}
     if not raw.packsSeeded then
         seed(packs, C.VEHICLE_PACKS)
         seed(loot, C.LOOT_PACKS)
     end
+    if not raw.weaponPacksSeeded then seed(arms, C.WEAPON_PACKS) end -- own flag: weapon packs came after the others were seeded
     local cfg = { version = C.VERSION, schema = C.SCHEMA, limits = cleanFields(Store.limitsSchema, raw.limits), events = {}, presets = {},
-        lootPacks = loot, vehiclePacks = packs, packsSeeded = true,
+        orphans = { events = {}, presets = {} },
+        lootPacks = loot, vehiclePacks = packs, weaponPacks = arms, packsSeeded = true, weaponPacksSeeded = true,
         schedules = normSchedules(raw.schedules), nextScheduleId = type(raw.nextScheduleId) == "number" and raw.nextScheduleId or 1 }
     for id in pairs(cfg.schedules) do -- never reissue an id that is in use
         local n = tonumber(id:match("^s(%d+)$"))
         if n and n >= cfg.nextScheduleId then cfg.nextScheduleId = n + 1 end
     end
+    -- D55: config and presets of an event with no loaded module (a mod removed) wait in cfg.orphans, out of the UI, and come back with it
+    local orph, evs, pre = tbl(raw.orphans), {}, {}
+    for _, src in ipairs({ tbl(orph.events), tbl(raw.events) }) do for id, e in pairs(src) do evs[id] = e end end
+    for _, src in ipairs({ tbl(orph.presets), tbl(raw.presets) }) do for name, p in pairs(src) do pre[name] = p end end
+    local live = {}
     for _, def in ipairs(SEM.EventDefs) do
-        cfg.events[def.id] = normEvent(def, tbl(raw.events)[def.id])
+        if def.modded and not (SEM.Events and SEM.Events[def.id]) then
+            print("[SEM] event '" .. def.id .. "' has no server module (SEM.Events." .. def.id .. "); its settings are kept but it cannot run")
+        else
+            live[def.id] = def
+            cfg.events[def.id] = normEvent(def, evs[def.id])
+        end
+    end
+    for id, e in pairs(evs) do
+        if not live[id] and type(id) == "string" and type(e) == "table" then cfg.orphans.events[id] = copy(e) end
     end
     local n = 0
-    for name, p in pairs(tbl(raw.presets)) do
-        local def = type(p) == "table" and SEM.EventDefs.byId[p.eventId]
-        if n < Store.MAX_PRESETS and validName(name) and def then
-            cfg.presets[name] = { eventId = def.id, options = cleanFields(def.options, p.options) }
+    for name, p in pairs(pre) do
+        local def = type(p) == "table" and live[p.eventId]
+        if n < Store.MAX_PRESETS and validName(name) and (def or type(p) == "table" and type(p.eventId) == "string") then
+            if def then cfg.presets[name] = { eventId = def.id, options = cleanFields(def.options, p.options) }
+            else cfg.orphans.presets[name] = copy(p) end
             n = n + 1
         end
     end
@@ -262,6 +305,7 @@ local function normWorld(raw)
         nextRunId = type(raw.nextRunId) == "number" and raw.nextRunId or 1,
         runs = tbl(raw.runs), history = tbl(raw.history), windows = tbl(raw.windows),
         lastFired = tbl(raw.lastFired), nextGameHour = tbl(raw.nextGameHour), sweeps = tbl(raw.sweeps), queue = tbl(raw.queue),
+        takeovers = tbl(raw.takeovers), takeoverFires = tbl(raw.takeoverFires), -- D49
     }
 end
 
@@ -284,8 +328,20 @@ local function serverClock()
     return ok and c or nil
 end
 
+-- server time zone in minutes from UTC, daylight saving included; nil where Calendar is not exposed
+local function serverOffset()
+    if not (Calendar and Calendar.getInstance) then return nil end
+    local ok, m = pcall(function()
+        local cal = Calendar.getInstance()
+        return (cal:get(Calendar.ZONE_OFFSET) + cal:get(Calendar.DST_OFFSET)) / 60000
+    end)
+    return ok and m or nil
+end
+
 function Store.snapshot()
-    return { config = copy(Store.config), runs = copy(Store.world.runs), history = copy(Store.world.history), queue = copy(Store.world.queue),
+    local config = copy(Store.config)
+    config.orphans = nil -- D55: not for the UI
+    return { serverOffsetMin = serverOffset(), config = config, runs = copy(Store.world.runs), history = copy(Store.world.history), queue = copy(Store.world.queue),
         serverClock = serverClock(), bases = SEM.Targets and SEM.Targets.bases() or nil, gameDay = SEM.Scheduler and SEM.Scheduler.gameDay() }
 end
 
@@ -347,6 +403,8 @@ function Store.saveLootPacks(packs) Store.config.lootPacks = packs end
 
 function Store.savePacks(packs) Store.config.vehiclePacks = packs end
 
+function Store.saveWeaponPacks(packs) Store.config.weaponPacks = packs end
+
 function Store.presetCount()
     local n = 0
     for _ in pairs(Store.config.presets) do n = n + 1 end
@@ -355,15 +413,19 @@ end
 
 -- ---- export / import (D48) ----
 
-local EXPORT_KEYS = { schema = true, limits = true, events = true, presets = true, schedules = true, lootPacks = true, vehiclePacks = true }
+local EXPORT_KEYS = { schema = true, limits = true, events = true, presets = true, schedules = true, lootPacks = true, vehiclePacks = true, weaponPacks = true }
+local OPTIONAL_SECTIONS = { schema = true, weaponPacks = true } -- an export from before weapon packs has none; the current ones stay
 local ENTRY_KEYS = { name = true, eventId = true, preset = true, enabled = true, schedule = true, conditions = true }
 
--- the saved config minus live state (next/last times, ids inside entries, the seeding flag)
+-- the saved config minus live state (next/last times, ids inside entries, the seeding flag). The settings kept for events
+-- with no module (D55) are exported with the rest, so a backup is whole.
 function Store.exportConfig()
     local c = copy(Store.config)
+    for id, e in pairs(c.orphans.events) do c.events[id] = e end
+    for name, p in pairs(c.orphans.presets) do c.presets[name] = p end
     for _, e in pairs(c.schedules) do e.id, e.next, e.last = nil, nil, nil end
     return { schema = C.SCHEMA, limits = c.limits, events = c.events, presets = c.presets, schedules = c.schedules,
-        lootPacks = c.lootPacks, vehiclePacks = c.vehiclePacks }
+        lootPacks = c.lootPacks, vehiclePacks = c.vehiclePacks, weaponPacks = c.weaponPacks }
 end
 
 local function firstKey(errs)
@@ -388,13 +450,19 @@ function Store.buildConfig(raw)
         if not EXPORT_KEYS[k] then return nil, "config." .. tostring(k) .. ": unknown section" end
     end
     for k in pairs(EXPORT_KEYS) do -- a half-pasted config must never wipe the rest
-        if k ~= "schema" and raw[k] == nil then return nil, "config." .. k .. ": section is missing" end
+        if not OPTIONAL_SECTIONS[k] and raw[k] == nil then return nil, "config." .. k .. ": section is missing" end
     end
     if raw.schema ~= nil and not (type(raw.schema) == "number" and raw.schema >= 1 and raw.schema <= C.SCHEMA) then
         return nil, "schema: must be a number from 1 to " .. C.SCHEMA .. " (this export may come from a newer mod)"
     end
     Store.migrate(raw)
-    local cfg = { version = C.VERSION, schema = C.SCHEMA, events = {}, presets = {}, packsSeeded = true, schedules = {}, nextScheduleId = 1 }
+    local cfg = { version = C.VERSION, schema = C.SCHEMA, events = {}, presets = {}, orphans = { events = {}, presets = {} }, packsSeeded = true,
+        weaponPacksSeeded = true, weaponPacks = Store.config.weaponPacks, schedules = {}, nextScheduleId = 1 }
+    -- D55: an event id that is unknown stays an error, except one whose settings are already kept (its mod is not loaded now)
+    local live, kept = Store.config.events, {}
+    for id in pairs(Store.config.orphans.events) do kept[id] = true end
+    for _, p in pairs(Store.config.orphans.presets) do kept[p.eventId] = true end
+    for _, e in pairs(Store.config.schedules) do if not live[e.eventId] then kept[e.eventId] = true end end
 
     local lim = raw.limits == nil and {} or raw.limits
     local ok, clean, errs = O.validate(Store.limitsSchema, lim)
@@ -404,15 +472,21 @@ function Store.buildConfig(raw)
     local evs = raw.events == nil and {} or raw.events
     if type(evs) ~= "table" then return nil, "events: must be an object" end
     for id, e in pairs(evs) do
-        if type(id) ~= "string" or not SEM.EventDefs.byId[id] then return nil, "events." .. tostring(id) .. ": unknown event" end
+        if type(id) ~= "string" or not (SEM.EventDefs.byId[id] or kept[id]) then return nil, "events." .. tostring(id) .. ": unknown event" end
         if type(e) ~= "table" then return nil, "events." .. id .. ": must be an object" end
         for k in pairs(e) do if k ~= "options" then return nil, "events." .. id .. "." .. tostring(k) .. ": unknown key" end end
+        if not live[id] then
+            if e.options ~= nil and type(e.options) ~= "table" then return nil, "events." .. id .. ".options: must be an object" end
+            cfg.orphans.events[id] = { options = e.options or {} }
+        end
     end
     for _, def in ipairs(SEM.EventDefs) do
         local e = evs[def.id]
-        ok, clean, errs = O.validate(def.options, tbl(e).options == nil and {} or e.options)
-        if not ok then local k, m = firstKey(errs) return nil, "events." .. def.id .. ".options." .. k .. ": " .. tostring(m) end
-        cfg.events[def.id] = { options = clean }
+        if live[def.id] then
+            ok, clean, errs = O.validate(def.options, tbl(e).options == nil and {} or e.options)
+            if not ok then local k, m = firstKey(errs) return nil, "events." .. def.id .. ".options." .. k .. ": " .. tostring(m) end
+            cfg.events[def.id] = { options = clean }
+        end
     end
 
     local pre = raw.presets == nil and {} or raw.presets
@@ -428,18 +502,23 @@ function Store.buildConfig(raw)
             if k ~= "eventId" and k ~= "options" then return nil, "presets." .. name .. "." .. tostring(k) .. ": unknown key" end
         end
         local def = type(p.eventId) == "string" and SEM.EventDefs.byId[p.eventId]
-        if not def then return nil, "presets." .. name .. ".eventId: unknown event" end
-        ok, clean, errs = O.validate(def.options, p.options == nil and {} or p.options)
-        if not ok then local k, m = firstKey(errs) return nil, "presets." .. name .. ".options." .. k .. ": " .. tostring(m) end
-        cfg.presets[name] = { eventId = def.id, options = clean }
+        if not (def or kept[p.eventId]) then return nil, "presets." .. name .. ".eventId: unknown event" end
+        if def and live[def.id] then
+            ok, clean, errs = O.validate(def.options, p.options == nil and {} or p.options)
+            if not ok then local k, m = firstKey(errs) return nil, "presets." .. name .. ".options." .. k .. ": " .. tostring(m) end
+            cfg.presets[name] = { eventId = def.id, options = clean }
+        else
+            if p.options ~= nil and type(p.options) ~= "table" then return nil, "presets." .. name .. ".options: must be an object" end
+            cfg.orphans.presets[name] = { eventId = p.eventId, options = p.options or {} }
+        end
     end
 
-    for _, sec in ipairs({ { "vehiclePacks", false }, { "lootPacks", true } }) do
+    for _, sec in ipairs({ { "vehiclePacks", false }, { "lootPacks", true }, { "weaponPacks", "weapon" } }) do
         local v = raw[sec[1]]
         if v ~= nil and (type(v) ~= "table" or not isList(v)) then return nil, sec[1] .. ": must be a list" end
         local pok, packs, perrs = Store.validatePacks(v, sec[2])
         if not pok then local k, m = firstKey(perrs) return nil, sec[1] .. "." .. k .. ": " .. tostring(m) end
-        cfg[sec[1]] = packs
+        if v ~= nil or sec[1] ~= "weaponPacks" then cfg[sec[1]] = packs end
     end
 
     local sch = raw.schedules == nil and {} or raw.schedules
@@ -469,12 +548,13 @@ function Store.buildConfig(raw)
                 end
             end
         end
-        local eok, entry, eerrs = Store.validateEntry(e, id)
+        local eok, entry, eerrs = Store.validateEntry(e, id, true)
         if not eok then local k, m = firstKey(eerrs) return nil, "schedules." .. id .. "." .. k .. ": " .. tostring(m) end
+        if not (SEM.EventDefs.byId[entry.eventId] or kept[entry.eventId]) then return nil, "schedules." .. id .. ".eventId: unknown event" end
         if names[entry.name] then return nil, "schedules." .. id .. ".name: another schedule already has this name" end
         names[entry.name] = true
         if entry.preset ~= "" then
-            local p = cfg.presets[entry.preset]
+            local p = cfg.presets[entry.preset] or cfg.orphans.presets[entry.preset]
             if not p then return nil, "schedules." .. id .. ".preset: no such preset" end
             if p.eventId ~= entry.eventId then return nil, "schedules." .. id .. ".preset: belongs to another event" end
         end

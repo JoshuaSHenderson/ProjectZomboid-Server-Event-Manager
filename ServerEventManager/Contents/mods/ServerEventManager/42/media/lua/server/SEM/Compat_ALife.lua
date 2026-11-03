@@ -1,6 +1,7 @@
 -- Server Event Manager: the only file that touches A-Life or Jeem. Every call is guarded.
 if isClient() then return end
 SEM = SEM or {}
+require "SEM/WeaponPacks"
 
 local Compat = {}
 SEM.Compat_ALife = Compat
@@ -127,6 +128,14 @@ Compat.TIERS = {
         weaponChance = "moderate", -- any value stops A-Life swapping the M16 for a single-shot M14 after world day 30
     },
 }
+-- D57: rawSpawn's admin flags, the only combat numbers A-Life takes per spawn: health (its usual NPC has 50), damageOutput (percent of the weapon's
+-- damage, 1 to 500) and damageReduction (percent of incoming damage blocked, 0 to 90). Normal sets none, so A-Life's own values stand.
+Compat.DIFFICULTY = {
+    easy = { health = 35, damageOutput = 70 },
+    normal = {},
+    hard = { health = 75, damageOutput = 130, damageReduction = 15 },
+    brutal = { health = 100, damageOutput = 180, damageReduction = 30 },
+}
 Compat.REQUEST_CAP = 8 -- rawSpawn takes at most 8 per request
 
 -- count split into request sizes of at most cap: 10 -> { 8, 2 }
@@ -142,6 +151,12 @@ function Compat.split(count, cap)
 end
 
 local seq = 0
+
+-- ---- weapon packs: shared/SEM/WeaponPacks.lua (the plan wrapper runs on server and client) ----
+local WP = SEM.WeaponPacks
+Compat.armed, Compat.hashPick, Compat.splitPack, Compat.loadout = WP.armed, WP.hashPick, WP.splitPack, WP.loadout
+Compat.isGun, Compat.armPlan = WP.isGun, WP.armPlan
+local wrapPlan = WP.wrapPlan
 
 -- every profile id of a tier in one flat list
 function Compat.poolProfiles(def)
@@ -175,7 +190,8 @@ end
 -- Returns how many were accepted and, when 0, a reason. See docs/spikes.md "Guard leash (D31)".
 -- raid = { mode, x, y, target } turns the group into an A-Life raid party or manhunt after that username, set up the way RaidDirector's
 -- own waves are: no leash, and Jeem lets them force entry to a base. x, y is a raid's objective; a manhunt has none and persists.
-local function group(anchorPlayer, x, y, z, count, tier, radius, leash, firstMode, raid)
+-- pack = a weapon pack { weapons, ammo } (Spawn.weaponPack) or nil for the tier's own weapons.
+local function group(anchorPlayer, x, y, z, count, tier, radius, leash, firstMode, raid, difficulty, pack)
     local ok, spawned, reason = pcall(function()
         local def = Compat.TIERS[tier]
         if not def then return 0, "unknown tier " .. tostring(tier) end
@@ -191,6 +207,7 @@ local function group(anchorPlayer, x, y, z, count, tier, radius, leash, firstMod
         local want = math.max(1, math.min(10, count or 1))
         local ids = Compat.pickProfiles(def, want, ZombRand) -- one shuffle for the whole group, split over the requests
         local made, why, at = 0, nil, 0
+        if pack then wrapPlan() end
         for i, n in ipairs(Compat.split(want)) do
             seq = seq + 1
             local args = { mode = i == 1 and firstMode or "guard", x = x, y = y, z = z, radius = radius, count = n, separation = 1,
@@ -198,6 +215,7 @@ local function group(anchorPlayer, x, y, z, count, tier, radius, leash, firstMod
                 supportPolicy = "disabled", -- no reinforcements: they would arrive unleashed
                 leashRadius = leash, -- only read when rawSpawn's third argument is true
                 requestId = "sem-guards:" .. tostring(getTimestampMs()) .. ":" .. seq }
+            for k, v in pairs(Compat.DIFFICULTY[difficulty] or {}) do args[k] = v end
             args.profileIds = {}
             for k = 1, n do args.profileIds[k] = ids[at + k] end
             at = at + n
@@ -208,7 +226,15 @@ local function group(anchorPlayer, x, y, z, count, tier, radius, leash, firstMod
                 args.radius, args.separation = radius, 2
             end
             local r = service.rawSpawn(anchorPlayer, args, true)
-            if type(r) == "table" and r.accepted and r.accepted > 0 then made = made + r.accepted
+            if type(r) == "table" and r.accepted and r.accepted > 0 then
+                made = made + r.accepted
+                -- rawSpawn only queues jobs; Service.tick hydrates them later, so the group is known here in time
+                if pack and r.groupId then
+                    local entry = { weapons = pack.weapons, ammo = pack.ammo }
+                    WP.armed[tostring(r.groupId)] = entry
+                    -- the owning client builds the NPC's loadout too; it needs the pack before it adopts the shell
+                    pcall(sendServerCommand, SEM.Config.MODULE, "armed", { groupId = tostring(r.groupId), weapons = entry.weapons, ammo = entry.ammo })
+                end
             else
                 why = type(r) == "table" and tostring(r.reason) or "no answer from A-Life"
                 -- a refused camp scene stops here: the later guard requests would make `made` > 0 and hide the refusal,
@@ -223,34 +249,34 @@ local function group(anchorPlayer, x, y, z, count, tier, radius, leash, firstMod
 end
 
 -- holds a site with up to 10 hostile A-Life NPCs at the tier; returns how many were accepted, and a reason when it is 0
-function Compat.spawnGuards(anchorPlayer, x, y, z, count, tier, radius, leash)
-    return group(anchorPlayer, x, y, z, count, tier, radius, leash, "guard")
+function Compat.spawnGuards(anchorPlayer, x, y, z, count, tier, radius, leash, difficulty, pack)
+    return group(anchorPlayer, x, y, z, count, tier, radius, leash, "guard", nil, difficulty, pack)
 end
 
 -- A real visible camp: rawSpawn mode "camp" makes A-Life's SceneKit build tents and a campfire and seats the first request's
 -- NPCs there. The OutpostPresets route (debugBuildOutpost: registry, builder and director calls, a persistent site A-Life
 -- ages out itself) was judged too fragile, see docs/spikes.md "Hostile camp". When the scene is refused (no clear ground,
 -- no SceneKit) the group is spawned as plain guards instead. Returns made, reason (when 0) and "camp" or "guard".
-function Compat.spawnCamp(anchorPlayer, x, y, z, count, tier, leash)
-    local made, why = group(anchorPlayer, x, y, z, count, tier, leash, leash, "camp")
+function Compat.spawnCamp(anchorPlayer, x, y, z, count, tier, leash, difficulty, pack)
+    local made, why = group(anchorPlayer, x, y, z, count, tier, leash, leash, "camp", nil, difficulty, pack)
     if made > 0 then return made, nil, "camp" end
-    local plain, plainWhy = group(anchorPlayer, x, y, z, count, tier, leash, leash, "guard")
+    local plain, plainWhy = group(anchorPlayer, x, y, z, count, tier, leash, leash, "guard", nil, difficulty, pack)
     if plain > 0 then return plain, nil, "guard" end
     return 0, plainWhy or why, "guard"
 end
 
 -- one siege wave at (x,y,z), marching on (objX,objY) after the anchor player; returns how many were accepted and a reason when 0
-function Compat.spawnRaid(anchorPlayer, x, y, z, count, tier, objX, objY)
+function Compat.spawnRaid(anchorPlayer, x, y, z, count, tier, objX, objY, difficulty, pack)
     local target
     pcall(function() target = anchorPlayer:getUsername() end)
-    return group(anchorPlayer, x, y, z, count, tier, SEM.Config.SIEGE_RADIUS, 100, "guard", { mode = "full_raid", x = objX, y = objY, target = target })
+    return group(anchorPlayer, x, y, z, count, tier, SEM.Config.SIEGE_RADIUS, 100, "guard", { mode = "full_raid", x = objX, y = objY, target = target }, difficulty, pack)
 end
 
 -- hunters at (x,y,z) in manhunt mode after the player; returns how many were accepted and a reason when 0
-function Compat.spawnHunters(player, x, y, z, count, tier)
+function Compat.spawnHunters(player, x, y, z, count, tier, difficulty, pack)
     local target
     pcall(function() target = player:getUsername() end)
-    return group(player, x, y, z, count, tier, 8, 100, "guard", { mode = "manhunt", target = target })
+    return group(player, x, y, z, count, tier, 8, 100, "guard", { mode = "manhunt", target = target }, difficulty, pack)
 end
 
 -- one friendly NPC from the workers' pool at (x,y,z), leashed to the spot. Returns 1 and its faction id, or 0, nil and a reason

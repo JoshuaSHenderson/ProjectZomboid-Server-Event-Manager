@@ -130,7 +130,7 @@ local function run()
     check("random resolved", picked == "zombies" or picked == "npc", true)
     check("random recorded", rr and rr.resolved.guardType, picked)
     local rcount = rr and (picked == "npc" and rr.options.npcCount or rr.options.guardCount)
-    check("random count in default range", rcount ~= nil and rcount >= 3 and rcount <= 8, true)
+    check("random count in default range", rcount ~= nil and rcount >= (picked == "npc" and 3 or 8) and rcount <= (picked == "npc" and 8 or 20), true)
     if rr then R.status(rr, "x") end
     check("random stays", rr and rr.options.guardType, picked)
     check("random not saved over config", Store.config.events.airdrop.options.guardType, "random")
@@ -284,10 +284,10 @@ local function run()
 
     -- guard min/max: rejected when max < min, and a random run lands inside the range
     sent = {}
-    S(SEM.Config.MODULE, "saveEvent", player, { id = "airdrop", options = { guardMin = 7, guardMax = 3 } })
-    check("max<min rejected", find("error") and find("error").errors["options.guardMax"] ~= nil, true)
+    S(SEM.Config.MODULE, "saveEvent", player, { id = "airdrop", options = { guardNpcMin = 7, guardNpcMax = 3 } })
+    check("max<min rejected", find("error") and find("error").errors["options.guardNpcMax"] ~= nil, true)
     local ao = Store.config.events.airdrop.options
-    ao.guardType, ao.guardMin, ao.guardMax = "random", 4, 6
+    ao.guardType, ao.guardNpcMin, ao.guardNpcMax, ao.guardZombieMin, ao.guardZombieMax = "random", 4, 6, 4, 6
     local counts = {}
     for _ = 1, 6 do
         local gr = R.begin("airdrop", "force")
@@ -441,7 +441,7 @@ local function run()
     local ar = R.begin("airdrop", "force")
     local ho0 = Store.config.events.horde.options
     local keepHLead, keepHTarget = ho0.leadMinutes, ho0.targetType
-    ho0.leadMinutes, ho0.targetType = 1, "nearestPlayer"
+    ho0.leadMinutes, ho0.targetType = 1, "randomPlayer"
     Store.config.limits.maxConcurrent = 5
     local hz = R.begin("horde", "force")
     getOnlinePlayers = noPlayers
@@ -526,7 +526,7 @@ local function run()
     Store.config.limits.maxConcurrent = 5
     local ho, wo = Store.config.events.horde.options, Store.config.events.wildfire.options
     ho.leadMinutes, wo.leadMinutes = 0, 0
-    ho.targetType = "nearestPlayer"
+    ho.targetType = "randomPlayer"
     local hr, hwhy = R.begin("horde", "force")
     if hr then
         check("horde active", hr.state, "active")
@@ -545,7 +545,7 @@ local function run()
     hr, hwhy = R.begin("horde", "force")
     if hr then R.cancel(hr.id) end
     check("far target allowed when not required", tostring(hwhy):find("no player within", 1, true), nil)
-    ho.targetType, ho.requirePlayerNear = "nearestPlayer", true
+    ho.targetType, ho.requirePlayerNear = "randomPlayer", true
     -- a horde run left over from before a restart has no zombie list: it ends and says so
     local fake = { id = 9001, eventId = "horde", state = "active", placed = true, title = "Horde", options = ho, data = {}, elapsed = 0, lastSeen = now }
     Store.world.runs["9001"] = fake
@@ -599,6 +599,26 @@ local function run()
     check("vehicle scripts listed", known ~= nil, true)
     for _, id in ipairs(SEM.Config.CONVOY_VEHICLES) do check("default vehicle exists " .. id, known and known[id], true) end
     check("unknown vehicle id is unknown", known and known["Mod.NoSuchCar"], nil)
+    -- weapon packs: seeded, and every default weapon classifies on the server the way the A-Life plan wrapper reads it
+    check("weapon packs seeded", #(SEM.Store.config.weaponPacks or {}) >= #SEM.Config.WEAPON_PACKS, true)
+    local A = SEM.Compat_ALife
+    check("pistol is a gun", A.isGun("Base.Pistol"), true)
+    check("axe is melee", A.isGun("Base.Axe"), false)
+    check("nails are no weapon", A.isGun("Base.Nails"), nil)
+    for _, p in ipairs(SEM.Config.WEAPON_PACKS) do
+        for _, id in ipairs(p.weapons) do check("default weapon is a weapon " .. id, A.isGun(id) ~= nil, true) end
+    end
+    local vms = getScriptManager():getModelScript("Base.Vehicles_PickUpBurnt") -- control: a vanilla burnt car's model script
+    print("[SEM-TEST] info vanilla burnt model=" .. tostring(vms) .. " mesh=" .. tostring(vms and vms:getMeshName()))
+    for _, id in ipairs({ "Base.SEM_CrashHeli", "Base.SEM_CrashPlane" }) do
+        check("aircraft wreck script " .. id, known and known[id], true)
+        -- the model script the vehicle names must exist, or the wreck is an invisible wall (seen 2026-11-02 with module SEM)
+        local name = id:gsub("^Base%.", "")
+        local ms = getScriptManager():getModelScript("Base." .. name)
+        local ok, mesh = pcall(function() return ms:getMeshName() end)
+        print("[SEM-TEST] info wreck " .. id .. " model=" .. tostring(ms) .. " mesh=" .. tostring(ok and mesh or nil))
+        check("aircraft wreck model script " .. id, ms ~= nil, true)
+    end
     local ids, skipped = Cv.usable({ "Base.CarNormal", "Mod.NoSuchCar" }, known)
     check("unknown id skipped", table.concat(skipped, ","), "Mod.NoSuchCar")
     check("real id kept", ids[1], "Base.CarNormal")
@@ -661,8 +681,11 @@ local function run()
     -- Under Siege and Hunted: no players here, so both refuse cleanly; A-Life's internals they lean on must exist
     local so, ho = Store.config.events.siege.options, Store.config.events.hunted.options
     so.leadMinutes, ho.leadMinutes = 0, 0
+    local keepPlayers = getOnlinePlayers
+    getOnlinePlayers = function() return { size = function() return 0 end, get = function() end } end -- really nobody: the stub player is no IsoPlayer
     check("siege refused", R.begin("siege", "force"), nil)
     check("hunted refused", R.begin("hunted", "force"), nil)
+    getOnlinePlayers = keepPlayers
     check("bases list", type(SEM.Targets.bases()), "table")
     local cars = SEM.Events.convoy.knownVehicles()
     for _, pack in ipairs(SEM.Config.VEHICLE_PACKS) do

@@ -1,4 +1,4 @@
--- Server Event Manager: Loot Packs and Vehicle Packs pages. Named lists chosen in the table picker; events pick a pack by name.
+-- Server Event Manager: Loot Packs, Vehicle Packs and Weapon Packs pages. Named lists chosen in the table picker; events pick a pack by name.
 if isServer() then return end
 require "SEM/Theme"
 require "SEM/Config"
@@ -11,11 +11,13 @@ SEM.PacksPage = P
 
 local TIERS, TIER_NAMES = { "low", "medium", "high" }, { "Low", "Medium", "High" }
 local TIER_HELP = "How good this pack counts as. An event set to Random Low, Medium or High Tier picks among the packs with that tier."
+local AMMO_HELP = "Rounds each NPC carries for its gun, 0 to 500. A gun with 0 rounds cannot fire. A-Life's sandbox ammo settings can still scale it."
 local PICKS_HELP = "Items in each crate. 0 rolls every row by its chance. A number picks that many rows at random for each crate, ignoring chance, so no two crates match."
 
 P.KINDS = {
     lootPacks = { field = "items", button = "Edit Loot", kind = "loot", cmd = "saveLootPacks", noun = "items", empty = "No packs. Crates fall back to the built-in list." },
     vehiclePacks = { field = "vehicles", button = "Edit Vehicles", kind = "vehicle", cmd = "savePacks", noun = "vehicles", empty = "No packs yet. Convoy Wreck uses the default cars." },
+    weaponPacks = { field = "weapons", button = "Edit Weapons", kind = "weapon", cmd = "saveWeaponPacks", noun = "weapons", empty = "No packs yet. NPCs carry the weapons of their NPC Level." },
 }
 
 -- the page's draft from the config; empty lists arrive from the server as nil
@@ -24,6 +26,7 @@ function P.draft(id, packs)
     for _, p in ipairs(list) do
         p[field] = p[field] or {}
         if id == "lootPacks" then p.tier = p.tier or "medium" end
+        if id == "weaponPacks" then p.ammo = p.ammo or 60 end
     end
     return { packs = list }
 end
@@ -37,6 +40,8 @@ function P.validate(d)
         elseif seen[n] then errs["pack" .. i] = "another pack has this name"
         elseif p.picks ~= nil and (type(p.picks) ~= "number" or p.picks < 0 or p.picks > 20 or p.picks ~= math.floor(p.picks)) then
             errs["pack" .. i] = "items per crate must be a whole number, 0 to 20"
+        elseif p.ammo ~= nil and (type(p.ammo) ~= "number" or p.ammo < 0 or p.ammo > 500 or p.ammo ~= math.floor(p.ammo)) then
+            errs["pack" .. i] = "ammo must be a whole number, 0 to 500"
         end
         seen[n] = true
     end
@@ -47,7 +52,7 @@ local function listText(k, list)
     local out = {}
     for i, e in ipairs(list) do
         if i > 6 then break end
-        out[i] = k.kind == "loot" and SEM.LootPicker.nameOf(e.item) or e
+        out[i] = k.kind == "loot" and SEM.LootPicker.nameOf(e.item) or k.kind == "weapon" and SEM.LootPicker.nameOf(e) or e
     end
     return table.concat(out, ", ") .. (#list > 6 and ", ..." or "")
 end
@@ -57,7 +62,7 @@ local GAP, MARGIN = 6, 18 -- column gap; right margin (scroll bar)
 -- c is the console, f its form, id the page. One row per pack; columns follow the view width.
 function P.build(c, f, d, y, id)
     local k = P.KINDS[id]
-    local loot = k.kind == "loot"
+    local loot, arms = k.kind == "loot", k.kind == "weapon"
     local fh, bh = T.fh(), T.bh()
     local rh = fh + 12
     local vw = f.view:getWidth()
@@ -65,6 +70,8 @@ function P.build(c, f, d, y, id)
     local cols = {}
     if loot then
         cols = { { "tier", T.tw("Medium") + 36 }, { "per", T.tw("Per Crate") + 4 }, { "cnt", T.tw("Items") + 8 } }
+    elseif arms then
+        cols = { { "ammo", T.tw("Ammo") + 24 }, { "cnt", T.tw("Weapons") + 8 } }
     else
         cols = { { "cnt", T.tw("Vehicles") + 8 } }
     end
@@ -85,6 +92,9 @@ function P.build(c, f, d, y, id)
         f:hlabel("Tier", X.tier, hy, T.c.dim, TIER_HELP)
         f:hlabel("Per Crate", X.per, hy, T.c.dim, PICKS_HELP)
         f:hlabel("Items", X.cnt, hy, T.c.dim)
+    elseif arms then
+        f:hlabel("Ammo", X.ammo, hy, T.c.dim, AMMO_HELP)
+        f:hlabel("Weapons", X.cnt, hy, T.c.dim)
     else
         f:hlabel("Vehicles", X.cnt, hy, T.c.dim)
     end
@@ -104,6 +114,8 @@ function P.build(c, f, d, y, id)
         if loot then
             f:combo("tier" .. i, X.tier, ey, W.tier, TIERS, p.tier, function(v) p.tier = v; f.onChange(false) end, TIER_NAMES)
             f:entry("pack" .. i, X.per, ey, math.min(W.per, 40), p.picks or 0, function(t) p.picks = tonumber(t) or t; f.onChange(false) end)
+        elseif arms then
+            f:entry("pack" .. i, X.ammo, ey, W.ammo, p.ammo or 60, function(t) p.ammo = tonumber(t) or t; f.onChange(false) end)
         end
         table.insert(f.marks, { tostring(#p[k.field]), X.cnt, ty, T.c.amber })
         f:button("Edit", X.edit, ey, W.edit, function()
@@ -140,6 +152,7 @@ function P.build(c, f, d, y, id)
             local p = { name = "Pack " .. (n + 1) }
             p[k.field] = {}
             if loot then p.picks, p.tier = 0, "medium" end
+            if arms then p.ammo = 60 end
             d.packs[#d.packs + 1] = p
             f.onChange(true)
         end)

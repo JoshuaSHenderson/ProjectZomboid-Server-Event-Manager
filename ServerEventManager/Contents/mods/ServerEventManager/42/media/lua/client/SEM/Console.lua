@@ -14,6 +14,8 @@ require "SEM/PacksPage"
 require "SEM/Presets"
 require "SEM/Feed"
 require "SEM/ConfigPage"
+require "SEM/Welcome"
+require "SEM/Walkthrough"
 
 local T, F, Net, SP, Packs = SEM.Theme, SEM.Fmt, SEM.Net, SEM.SchedulePage, SEM.PacksPage
 local Console = ISPanel:derive("SEM_Console")
@@ -21,7 +23,7 @@ SEM.Console = Console
 
 local HDR, FTR, RAIL, FEED, ROW = 40, 70, 220, 250, 34 -- HDR, FTR and ROW grow with the font (metrics)
 local TY, TABY, BH = HDR + 40, 18, 22 -- tab row y, tab row height, button height
-local MINW, MINH = 900, 500 -- below this the rail, centre and side panes would overlap
+local MINW, MINH = 940, 500 -- below this the rail, centre and side panes would overlap, and the footer buttons meet Trigger Now
 
 -- row, header and footer sizes for the current font; the defaults are the old constants
 local function metrics()
@@ -43,24 +45,29 @@ local LIMITS = {
 -- the pages under the event list: schema pages validate through Options, keyed "<page>.<field>"
 local PAGES = { limits = LIMITS }
 local RAIL_PAGES = {
+    { id = "home", title = "Home", hint = "Update notes from the latest release, and the walkthrough.", hintKey = "homehint" },
     { id = "scheduler", title = "Scheduler", hint = "Entries that run an event on a timer. Tick On to arm one.", hintKey = "schedhint" },
     { id = "limits", title = "Limits", hint = "Caps that apply to every event.", hintKey = "limitshint" },
     { id = "config", title = "Import / Export", hint = "The whole server configuration as JSON. Edit it here, or copy it out and paste one in.", hintKey = "confighint" },
     { id = "lootPacks", title = "Loot Packs", hint = "A loot pack is a named list of items, with a chance and count for each. Press Edit, then Add Random to fill it from the game's items. Choose a pack on each event page.", hintKey = "lootpackshint" },
     { id = "vehiclePacks", title = "Vehicle Packs", hint = "A pack is a named set of vehicles Convoy Wreck can use. Name it, press Edit and pick from every vehicle in the game, modded ones included. Choose a pack on the Convoy Wreck page.", hintKey = "packshint" },
+    { id = "weaponPacks", title = "Weapon Packs", hint = "A weapon pack is a named set of weapons for hostile NPCs. Each NPC gets one gun and one melee weapon from it at random, with the pack's ammo. Press Edit and pick from every weapon in the game, modded ones included. Choose packs on the event pages wherever NPCs fight.", hintKey = "weaponpackshint" },
 }
 -- rail order (D47 #22): a dim heading per section; events means the event list
 local SECTIONS = {
-    { key = "sec_global", title = "Global Settings", ids = { "limits", "config" } },
+    { key = "sec_home", title = "Start", ids = { "home" } },
+    { key = "sec_global", title = "Global Settings", ids = { "limits", "config" } }, -- the walkthrough starts from a button on Home
     { key = "events", title = "Events", events = true },
-    { key = "sec_packs", title = "Packs", ids = { "lootPacks", "vehiclePacks" } },
+    { key = "sec_modded", title = "Modded Events", events = "modded" }, -- D55: only when another mod registered an event
+    { key = "sec_packs", title = "Packs", ids = { "lootPacks", "vehiclePacks", "weaponPacks" } },
     { key = "sec_sched", title = "Scheduler", ids = { "scheduler" } },
 }
 local PILL = { OFF = "dim", ON = "green", WARNING = "hot", LIVE = "red" }
 
 -- survives close and reopen
 -- preset maps event id -> selected preset: Default, a preset name, or "" for a new one
-Console.mem = { sel = SEM.EventDefs[1].id, preset = {} }
+Console.RAIL, Console.FEED = RAIL, FEED
+Console.mem = { preset = {} }
 
 local function setOn(b, on)
     if not b then return end
@@ -125,9 +132,10 @@ function Console:new()
     o.backgroundColor, o.borderColor, o.moveWithMouse = T.c.bg, T.c.line, true
     o.drafts, o.base, o.serverErrs, o.localErrs, o.merged = {}, {}, {}, {}, {}
     o.pend = {} -- request id -> { cmd, id = event to reload, edit = schedule edit table to close }
-    o.sel, o.psel = Console.mem.sel, Console.mem.preset
-    o.def = SEM.EventDefs.byId[o.sel]
+    o.sel, o.psel = "home", Console.mem.preset -- every open starts on Home (Josh, 2026-11-02: its own rail page, at the top)
+    o.def = nil
     o.railScroll = 0
+    o.RAIL, o.FEED = RAIL, FEED
     return o
 end
 
@@ -141,6 +149,7 @@ function Console:initialise()
     self.reloadBtn = T.btn("Reload", RAIL + 16, h - 34, 0, self, function() SEM.ConfigPage.onReload(self) end)
     self.saveBtn = T.btn("Update", RAIL + 16, h - 34, 0, self, Console.onSave)
     self.saveAsBtn = T.btn("Save As", RAIL + 114, h - 34, 0, self, Console.onSaveAs)
+    self.dupBtn = T.btn("Copy", RAIL + 114, h - 34, 0, self, Console.onDup)
     self.cancelBtn = T.btn("Cancel", RAIL + 114, h - 34, 0, self, Console.onCancel)
     self.delBtn = T.btn("Delete", RAIL + 114, h - 34, 0, self, Console.onDelete)
     self.forceBtn = T.btn("Trigger Now", w - FEED - 186, h - 34, 0, self, Console.onForce)
@@ -148,7 +157,7 @@ function Console:initialise()
     -- right side: Active Events above Logs, each its own scroller, split about 50/50 (positions in layout)
     self.active = SEM.Feed.new(0, 0, FEED - 12, 40, "active")
     self.logs = SEM.Feed.new(0, 0, FEED - 12, 40, "logs")
-    for _, c in ipairs({ self.closeBtn, self.copyBtn, self.pasteBtn, self.reloadBtn, self.saveBtn, self.saveAsBtn, self.cancelBtn, self.delBtn, self.forceBtn, self.active, self.logs }) do self:addChild(c) end
+    for _, c in ipairs({ self.closeBtn, self.copyBtn, self.pasteBtn, self.reloadBtn, self.saveBtn, self.saveAsBtn, self.dupBtn, self.cancelBtn, self.delBtn, self.forceBtn, self.active, self.logs }) do self:addChild(c) end
     T.grip(self, MINW, MINH)
     self:layout()
     self:syncDrafts()
@@ -183,7 +192,7 @@ function Console:layout()
     local by = h - BH - 12
     self.closeBtn:setX(w - 40)
     self.closeBtn:setY(math.floor((HDR - BH) / 2))
-    for _, b in ipairs({ self.copyBtn, self.pasteBtn, self.reloadBtn, self.saveBtn, self.saveAsBtn, self.cancelBtn, self.delBtn, self.forceBtn }) do b:setY(by) end
+    for _, b in ipairs({ self.copyBtn, self.pasteBtn, self.reloadBtn, self.saveBtn, self.saveAsBtn, self.dupBtn, self.cancelBtn, self.delBtn, self.forceBtn }) do b:setY(by) end
     self.forceBtn:setX(w - FEED - 16 - self.forceBtn:getWidth())
     local half, off = math.floor((h - HDR - 16) / 2), math.max(20, T.fh() + 6)
     self.paneTop, self.paneHalf = HDR + 8, half
@@ -292,16 +301,18 @@ function Console:updateButtons()
     self.saveBtn:setTitle(ev and "Update" or "Save")
     setOn(self.saveBtn, self.dirty and ok and not fresh)
     setOn(self.saveAsBtn, ev and d ~= nil and ok and nm ~= "" and nm ~= sel)
+    setOn(self.dupBtn, ev and d ~= nil)
     setOn(self.cancelBtn, editing or (ev and self.dirty))
     setOn(self.delBtn, ev and sel ~= DEFAULT and not fresh)
     setOn(self.forceBtn, ev and d ~= nil and ok and (not fresh or nm ~= ""))
     local cfg = self.sel == "config"
     if cfg then self.saveBtn:setTitle("Save"); setOn(self.saveBtn, true) end
     for _, b in ipairs({ self.copyBtn, self.pasteBtn, self.reloadBtn }) do setOn(b, true) end
-    local show = { [self.saveBtn] = cfg or self.sel ~= "scheduler" or editing, [self.saveAsBtn] = ev, [self.cancelBtn] = ev or editing,
+    local home = self.sel == "home"
+    local show = { [self.saveBtn] = cfg or (self.sel ~= "scheduler" and not home) or editing, [self.saveAsBtn] = ev, [self.dupBtn] = ev, [self.cancelBtn] = ev or editing,
         [self.delBtn] = ev, [self.copyBtn] = cfg, [self.pasteBtn] = cfg, [self.reloadBtn] = cfg }
     local x = RAIL + 16
-    for _, b in ipairs({ self.copyBtn, self.pasteBtn, self.saveBtn, self.saveAsBtn, self.cancelBtn, self.delBtn, self.reloadBtn }) do
+    for _, b in ipairs({ self.copyBtn, self.pasteBtn, self.saveBtn, self.saveAsBtn, self.dupBtn, self.cancelBtn, self.delBtn, self.reloadBtn }) do
         b:setVisible(show[b] == true)
         b:setX(x)
         if show[b] then x = x + b:getWidth() + 8 end
@@ -322,7 +333,10 @@ function Console:build()
     if self.view then self:removeChild(self.view) end
     self.view, self.form, self.sBtns, self.nameBox, self.builtKey, self.cfgBox = nil, nil, nil, nil, key, nil
     local d = self:cur()
-    if self.sel == "config" then
+    if self.sel == "home" then
+        self.view = SEM.Welcome.build(self, viewRect(self))
+        if keep then self.view:setYScroll(keep) end
+    elseif self.sel == "config" then
         self.view = SEM.ConfigPage.build(self, viewRect(self))
     elseif d or self.sel == "scheduler" then
         local v = T.scroller(viewRect(self))
@@ -349,6 +363,12 @@ function Console:build()
         if refocus and self.nameBox then self.nameBox:focus() end
     end
     self:validate()
+    if self.tour then self.tour.raise = true end
+end
+
+-- rebuilds the view on the next frame, never inside the click of a control in it (Home's walkthrough buttons use this)
+function Console:rebuildLater()
+    self.rebuildNext = true
 end
 
 -- a structural change rebuilds on the next frame, never inside the control's own click handler
@@ -362,7 +382,6 @@ function Console:setSel(id)
     if self.sel == "config" and id ~= "config" then self.cfg = nil end -- the page loads afresh next time
     self.sel, self.def = id, SEM.EventDefs.byId[id]
     self.serverErrs = {}
-    Console.mem.sel = self.sel
     self:build()
 end
 
@@ -465,8 +484,21 @@ function Console:onSaveAs()
     if self.def and self:cur() then self.serverErrs = {}; self:saveCurrent(true) end
 end
 
+-- Copy: the draft, edits and all, becomes a new unsaved preset ("New preset") named "<name> Copy"; Save As stores it
+function Console:onDup()
+    if self.form then self.form:poll() end
+    local id, d = self.sel, self:cur()
+    if not (self.def and d) then return end
+    local c = F.copy(d)
+    c.name = Presets.copyName(trim(d.name) ~= "" and d.name or "Preset")
+    self.psel[id], self.base[id], self.drafts[id] = "", presetData(self.def, ""), c
+    self.serverErrs = {}
+    self.rebuildNext = true
+end
+
 -- Cancel: the schedule edit view closes; an event page asks, then reloads the preset
 function Console:onCancel()
+    if self.tour and self.def then self.tour.closing = true end -- Cancel on an event page ends the walkthrough; closing the schedule form step 8 asked for does not
     if not self.def then return self:closeEdit() end
     local id = self.sel
     self:ask("Discard your changes?", function() self:loadPreset(id, self.psel[id]) end)
@@ -539,6 +571,7 @@ function Console.hide()
     if not c then return end
     local lp = SEM.LootPicker.instance
     if lp then lp:close() end
+    SEM.Walkthrough.stop(c)
     c:setVisible(false)
     c:removeFromUIManager()
     Console.instance = nil
@@ -554,11 +587,16 @@ function Console:prerender()
     if x ~= self.x then self:setX(x) end
     if y ~= self.y then self:setY(y) end
     if self.form then self.form:poll() end
+    if self.sel == "config" then SEM.ConfigPage.tick(self) end
     if self.laidW ~= self.width or self.laidH ~= self.height then self:layout() end
     if self.sizeDirty and not self.grip.resizing then self.sizeDirty, self.rebuildNext = false, true end
     T.saveSize(self, "semCon")
     if self.rebuildNext then self.rebuildNext = false; self:build() end
+    if self.startTour and not self.rebuildNext then self.startTour = false; SEM.Walkthrough.start(self) end
+    local tour = self.tour
+    if tour and tour.closing then SEM.Walkthrough.stop(self) elseif tour and tour.raise then SEM.Walkthrough.front(self) end
     ISPanel.prerender(self)
+    self:drawFrame()
 end
 
 local function firstError(errs)
@@ -574,11 +612,17 @@ function Console:drawRail()
     local snap = Net.snapshot or {}
     local top, headH, pageH = HDR + 1, fh + 8, math.max(28, fh + 14)
     local items, y = {}, 6
+    local modded = false -- a registered event is listed once the server has its settings, so a server without its mod shows none
+    local function shown(d) return not d.modded or ((snap.config or {}).events or {})[d.id] ~= nil end
+    for _, d in ipairs(SEM.EventDefs) do modded = modded or (d.modded == true and shown(d)) end
     for _, sec in ipairs(SECTIONS) do
+      if sec.events ~= "modded" or modded then
         items[#items + 1] = { head = SEM.t(sec.key, sec.title), y = y }
         y = y + headH
         if sec.events then
-            for _, d in ipairs(SEM.EventDefs) do items[#items + 1] = { ev = d, y = y }; y = y + ROW end
+            for _, d in ipairs(SEM.EventDefs) do
+                if (d.modded == true) == (sec.events == "modded") and shown(d) then items[#items + 1] = { ev = d, y = y }; y = y + ROW end
+            end
         else
             for _, id in ipairs(sec.ids) do
                 for _, p in ipairs(RAIL_PAGES) do if p.id == id then items[#items + 1] = { page = p, y = y } end end
@@ -586,6 +630,7 @@ function Console:drawRail()
             end
         end
         y = y + 6
+      end
     end
     local view = self.height - top
     self.railScroll = math.max(0, math.min(self.railScroll or 0, y - view))
@@ -611,7 +656,7 @@ function Console:drawRail()
             if on then T.rect(self, 1, iy, RAIL - 2, pageH, c.sel) end
             local mark = F.eq(self.drafts[p.id], self.base[p.id]) and "" or " *"
             T.text(self, SEM.t(p.id, p.title) .. mark, 14, iy + 6, on and c.hot or c.amber)
-            self.railHits[#self.railHits + 1] = { id = p.id, y = iy, h = pageH, action = p.action }
+            self.railHits[#self.railHits + 1] = { id = p.id, y = iy, h = pageH }
         end
     end
     self:clearStencilRect()
@@ -639,20 +684,24 @@ function Console:drawCentre()
     T.pill(self, self.width - FEED - 24 - T.tw(st), HDR + 10, st, c[PILL[st]], st == "WARNING" or st == "LIVE")
 end
 
-function Console:render()
+-- Drawn from prerender, before the children: PZ draws a panel's Lua render after its children, so lines drawn there crossed
+-- the walkthrough box and anything else on top (Josh 2026-11-03)
+function Console:drawFrame()
     local c, w, h = T.c, self.width, self.height
     T.rect(self, 1, 1, w - 2, HDR - 1, c.panel)
     T.rect(self, 0, HDR, w, 1, c.line)
     T.text(self, SEM.t("title", "Server Event Manager"), 14, (HDR - T.fh(T.font.med)) / 2, c.amber, T.font.med)
     local clock, srv = Net.clock()
-    T.textRight(self, (srv and "SERVER " or "CLIENT ") .. F.clockText(clock), w - 52, (HDR - T.fh()) / 2, c.hot)
+    local so, co = Net.offsets()
+    local yours = srv and so and " (YOURS " .. F.clockText(F.localClock(clock, so, co)) .. ")" or ""
+    T.textRight(self, (srv and "SERVER " or "CLIENT ") .. F.clockText(clock) .. yours, w - 52, (HDR - T.fh()) / 2, c.hot)
     T.rect(self, RAIL, HDR, 1, h - HDR, c.line)
+    self:drawRail()
     T.rect(self, w - FEED, HDR, 1, h - HDR, c.line)
     T.rect(self, RAIL, h - FTR, w - RAIL - FEED, 1, c.line)
     T.text(self, SEM.t("active", "Active Events"), w - FEED + 12, self.paneTop, c.dim)
     T.rect(self, w - FEED + 1, self.paneTop + self.paneHalf - 4, FEED - 1, 1, c.line)
     T.text(self, SEM.t("logs", "Logs"), w - FEED + 12, self.paneTop + self.paneHalf, c.dim)
-    self:drawRail()
     self:drawCentre()
     local msg, col = firstError(self.merged), c.red
     if self.sel == "config" and self.cfg then
@@ -671,6 +720,7 @@ end
 function Console:onMouseDown(x, y)
     for _, r in ipairs(self.railHits or {}) do
         if x < RAIL and y > HDR and y >= r.y and y < r.y + r.h then
+            T.click()
             if r.id ~= self.sel then self:trySel(r.id) end
             return true
         end
@@ -693,6 +743,7 @@ Events.OnResolutionChange.Add(function()
     local c = Console.instance
     if not c then return end
     c.drafts, c.base, c.edit, c.pend, c.cfg = old.drafts, old.base, old.edit, old.pend, old.cfg
+    if old.sel ~= c.sel then c:setSel(old.sel) end
     c:build()
 end)
 

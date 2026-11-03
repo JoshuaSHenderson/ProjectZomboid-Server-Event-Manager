@@ -1,5 +1,6 @@
 -- Server Event Manager: Migrating Horde. Zombies spawn in batches on loaded ground near a player, then a sound
--- 20 tiles ahead of the group is re-sent every pulse so it walks to the target (spike S3).
+-- 20 tiles ahead of the group is re-sent every pulse so it walks to the target (spike S3). Siege's zombie waves use the same
+-- batch spawn and steering (Horde.state, Horde.advance).
 if isClient() then return end
 require "SEM/Config"
 require "SEM/Spawn"
@@ -37,99 +38,42 @@ local function nearest(list, x, y)
 end
 Horde.nearest = nearest
 
-local function byId(list, id)
-    for _, e in ipairs(list) do
-        if id ~= "" and (e.id == id or e.owner == id) then return e end
-    end
-end
-
--- ctx gives lists on demand: players() = { name, x, y }, safehouses() = { id, owner, x, y }, jeem() and homes() = { id, x, y }.
--- Returns { kind, x, y, name, player = username to follow, nearest = true to follow the nearest player } or nil and a reason.
--- A jeem() or homes() of nil means that mod is absent. rand(n) gives 0..n-1.
+-- D56. ctx gives on demand: players() = { name, x, y, hours }, town() and countryside() = { x, y, name } or nil and a reason.
+-- Returns { kind, x, y, name, nearest = true to follow the nearest player } or nil and a reason. rand(n) gives 0..n-1.
 function Horde.pickTarget(o, ctx, rand)
     local t = o.targetType
-    local function pick(list) return list[rand(#list) + 1] end
-    -- D46: a random pick takes only bases with someone online; a named base with nobody online is refused
-    local function pickOnline(list)
-        local on = {}
-        for _, e in ipairs(list) do if not e.offline then on[#on + 1] = e end end
-        if #on > 0 then return pick(on) end
-    end
-    local function named(list, noun, missing)
-        local e = byId(list, o.targetBase)
-        if not e then return nil, missing .. " " .. tostring(o.targetBase) end
-        if e.offline then return nil, "nobody is online at " .. noun .. " " .. tostring(o.targetBase) end
-        return e
-    end
-    local function at(kind, e, extra)
-        local r = { kind = kind, x = e.x, y = e.y, name = e.name or e.id or kind }
-        for k, v in pairs(extra or {}) do r[k] = v end
-        return r
-    end
+    local function at(e) return { kind = t, x = e.x, y = e.y, name = e.name or t } end
     if t == "random" then
-        local pool = { "nearestPlayer", "randomSafehouse", "randomJeemBase", "aLifeHome" }
+        local pool = { "randomTown", "randomCountryside", "randomPlayer" }
         while #pool > 0 do
-            local i = rand(#pool) + 1
-            local copy = { targetType = table.remove(pool, i), targetBase = "" }
-            local r = Horde.pickTarget(copy, ctx, rand)
+            -- minAgeDays is shown for Random Player only, so a hidden value never narrows Random's player pick
+            local r = Horde.pickTarget({ targetType = table.remove(pool, rand(#pool) + 1), minAgeDays = 0 }, ctx, rand)
             if r then return r end
         end
         return nil, "no target of any kind is available"
-    elseif t == "nearestPlayer" then
+    elseif t == "randomPlayer" then
         local all, list = ctx.players(), {}
         for _, p in ipairs(all) do
             if SEM.Targets.oldEnough(p.hours, o.minAgeDays) then list[#list + 1] = p end -- D44
         end
         if #list == 0 then return nil, #all == 0 and "no players online" or "no player is at least " .. o.minAgeDays .. " days old" end
         -- starts on one player, then follows whoever is nearest the group among those old enough
-        return at(t, pick(list), { nearest = true, minAgeDays = o.minAgeDays })
-    elseif t == "chosenPlayer" then
-        for _, p in ipairs(ctx.players()) do
-            if p.name == o.targetPlayer and o.targetPlayer ~= "" then return at(t, p, { player = p.name }) end
-        end
-        return nil, "chosen player is not online"
+        local r = at(list[rand(#list) + 1])
+        r.nearest, r.minAgeDays = true, o.minAgeDays
+        return r
     elseif t == "location" then
         local l = o.targetLocation
         if type(l) ~= "table" then return nil, "no target location set" end
-        return at(t, { x = l.x, y = l.y, name = l.x .. "," .. l.y })
-    elseif t == "randomSafehouse" or t == "chosenSafehouse" then
-        local list = ctx.safehouses()
-        if #list == 0 then return nil, "no safehouses exist" end
-        if t == "randomSafehouse" then
-            local e = pickOnline(list)
-            if not e then return nil, "no safehouse has anyone online" end
-            return at(t, e)
-        end
-        local e, why = named(list, "safehouse", "no safehouse titled or owned by")
-        if not e then return nil, why end
-        return at(t, e)
-    elseif t == "randomJeemBase" or t == "chosenJeemBase" then
-        local list = ctx.jeem()
-        if not list or #list == 0 then return nil, "no Jeem bases (Project A-Life Jimmy not loaded or none exist)" end
-        if t == "randomJeemBase" then
-            local e = pickOnline(list)
-            if not e then return nil, "no Jeem base has anyone online" end
-            return at(t, e)
-        end
-        local e, why = named(list, "Jeem base", "no Jeem base with id")
-        if not e then return nil, why end
-        return at(t, e)
-    elseif t == "aLifeHome" then
-        local list = ctx.homes()
-        if not list or #list == 0 then return nil, "no A-Life homes (Project A-Life not loaded or none exist)" end
-        if (o.targetBase or "") == "" then
-            local e = pickOnline(list)
-            if not e then return nil, "no A-Life home has anyone online" end
-            return at(t, e)
-        end
-        local e, why = named(list, "A-Life home", "no A-Life home with key")
-        if not e then return nil, why end
-        return at(t, e)
+        return at({ x = l.x, y = l.y, name = l.x .. "," .. l.y })
+    elseif t == "randomTown" or t == "randomCountryside" then
+        local e, why = ctx[t == "randomTown" and "town" or "countryside"]()
+        if not e then return nil, why or "no target found" end
+        return at(e)
     end
     return nil, "unknown target type " .. tostring(t)
 end
 
--- where the target is now: a player target is re-read every pulse, the nearest-player target is re-chosen from the group's position
+-- where the target is now: a player target is re-chosen from the group's position
 function Horde.where(t, ctx, cx, cy)
     if t.nearest then
         local list = {}
@@ -138,10 +82,6 @@ function Horde.where(t, ctx, cx, cy)
         end
         local p = nearest(list, cx, cy)
         if p then t.x, t.y, t.name = p.x, p.y, p.name end
-    elseif t.player then
-        for _, p in ipairs(ctx.players()) do
-            if p.name == t.player then t.x, t.y = p.x, p.y end
-        end
     end
     return t.x, t.y
 end
@@ -157,13 +97,16 @@ local function players()
     return out
 end
 
+-- a town or countryside spot from Targets, as the location modes pick them
+local function spot(mode)
+    return function()
+        local p, why = SEM.Targets.resolve({ locationMode = mode, town = "Random", avoidForest = true })
+        return p and { x = p.x, y = p.y, name = p.x .. "," .. p.y } or nil, why
+    end
+end
+
 function Horde.ctx()
-    return {
-        players = players,
-        safehouses = SEM.Targets.safehouses,
-        jeem = SEM.Targets.jeem,
-        homes = SEM.Targets.homes,
-    }
+    return { players = players, town = spot("town"), countryside = spot("countryside") }
 end
 
 local function farFromPlayers(x, y)
@@ -185,7 +128,7 @@ local function findSpawn(o, anchor, t)
     else
         ux, uy = ux / len, uy / len
     end
-    for d = o.spawnDistance, C.HORDE_MIN_PLAYER, -10 do
+    for d = math.max(o.spawnDistance, C.HORDE_MIN_PLAYER), C.HORDE_MIN_PLAYER, -10 do
         for _ = 1, 12 do
             local a = math.rad(ZombRand(121) - 60)
             local x = math.floor(anchor.x + (ux * math.cos(a) - uy * math.sin(a)) * d)
@@ -202,7 +145,7 @@ local function alive(e)
 end
 
 -- drops the dead and the replaced; returns alive count and sets the group centre
-local function survey(st)
+function Horde.survey(st)
     local keep, sx, sy = {}, 0, 0
     for _, e in ipairs(st.refs) do
         if alive(e) then
@@ -218,7 +161,8 @@ local function survey(st)
     return #keep
 end
 
-local function spawnBatch(run, st)
+-- one batch of a run's zombies for its state; Siege spawns its zombie waves with it
+function Horde.spawnBatch(run, st)
     local o = run.options
     local sq
     for _ = 1, 10 do
@@ -255,23 +199,29 @@ local function spawnBatch(run, st)
     run.data.spawned = st.spawned
 end
 
-local function pulse(run, st)
-    local tx, ty = Horde.where(run.data.target, Horde.ctx(), st.cx, st.cy)
-    local px, py = Horde.leadPoint(st.cx, st.cy, tx, ty, C.HORDE_LEAD)
-    local r = run.options.pulseRadius
-    pcall(function() getWorldSoundManager():addSound(nil, math.floor(px), math.floor(py), 0, r, r) end)
+-- the state of a batch spawn starting at (x, y); the first sound goes out at once
+function Horde.newState(x, y, want, interval)
+    local now = SEM.Runner.clock()
+    return { refs = {}, left = want, want = want, spawned = 0, fails = 0, sx = x, sy = y,
+        lastPulse = now - interval, lastMarker = now, lastStatus = 0, cx = x, cy = y }
 end
 
--- one spawn batch and, when due, one steering sound; called from OnTick
+-- one spawn batch and, when due, one steering sound toward aim() (x, y); o gives pulseInterval and pulseRadius. Siege steers its
+-- zombie waves with it, so state lives in Horde.state like a horde's. Called from OnTick
+function Horde.advance(run, st, o, aim)
+    if st.left > 0 then Horde.spawnBatch(run, st) end
+    local now = SEM.Runner.clock()
+    if now - st.lastPulse >= o.pulseInterval and Horde.survey(st) > 0 then
+        st.lastPulse = now
+        local tx, ty = aim()
+        local px, py = Horde.leadPoint(st.cx, st.cy, tx, ty, C.HORDE_LEAD)
+        pcall(function() getWorldSoundManager():addSound(nil, math.floor(px), math.floor(py), 0, o.pulseRadius, o.pulseRadius) end)
+    end
+end
+
 function Horde.step(run)
     local st = Horde.state[run.id]
-    if not st then return end
-    if st.left > 0 then spawnBatch(run, st) end
-    local now = SEM.Runner.clock()
-    if now - st.lastPulse >= run.options.pulseInterval and survey(st) > 0 then
-        st.lastPulse = now
-        pulse(run, st)
-    end
+    if st then Horde.advance(run, st, run.options, function() return Horde.where(run.data.target, Horde.ctx(), st.cx, st.cy) end) end
 end
 
 function Horde.start(run)
@@ -305,9 +255,7 @@ function Horde.start(run)
     local want = Spawn.clamp(o.size)
     run.x, run.y, run.z = sq:getX(), sq:getY(), 0
     run.data = { target = t, want = want, spawned = 0 }
-    local now = SEM.Runner.clock()
-    Horde.state[run.id] = { refs = {}, left = want, want = want, spawned = 0, fails = 0, sx = run.x, sy = run.y,
-        lastPulse = now - o.pulseInterval, lastMarker = now, lastStatus = 0, cx = run.x, cy = run.y }
+    Horde.state[run.id] = Horde.newState(run.x, run.y, want, o.pulseInterval)
     run.placed = true
     if late then SEM.Runner.markerLate(run) end
     if warn then SEM.Runner.warn(run, warn) end
@@ -318,7 +266,7 @@ function Horde.update(run)
     if not run.placed then return false end
     local st = Horde.state[run.id]
     if not st then return "released by a restart; the zombies stay in the world" end
-    local n = survey(st)
+    local n = Horde.survey(st)
     if st.left == 0 and n == 0 then return st.spawned == 0 and "no zombies spawned" or "all dead" end
     local now = SEM.Runner.clock()
     local tx, ty = Horde.where(run.data.target, Horde.ctx(), st.cx, st.cy)
@@ -348,7 +296,7 @@ function Horde.stop(run)
     local st = Horde.state[run.id]
     Horde.state[run.id] = nil
     if not st then return nil end
-    local n = survey(st)
+    local n = Horde.survey(st)
     return n > 0 and (n .. " zombies left in the world") or nil
 end
 
@@ -359,9 +307,10 @@ Spawn.hook("OnTick", function()
     lastTick = ms
     if not (SEM.Store and SEM.Store.world) then return end
     for _, run in pairs(SEM.Store.world.runs) do
-        if type(run) == "table" and run.eventId == "horde" and run.state == "active" and Horde.state[run.id] then
-            local ok, err = pcall(Horde.step, run)
-            if not ok then SEM.Runner.fail(run, "horde step error: " .. tostring(err)) end
+        local mod = type(run) == "table" and run.state == "active" and Horde.state[run.id] and SEM.Events[run.eventId]
+        if mod then -- a horde, or a siege with a zombie wave
+            local ok, err = pcall(mod.step, run)
+            if not ok then SEM.Runner.fail(run, run.eventId .. " step error: " .. tostring(err)) end
         end
     end
 end)

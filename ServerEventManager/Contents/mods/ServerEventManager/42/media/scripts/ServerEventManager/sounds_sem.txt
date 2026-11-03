@@ -9,4 +9,14 @@ module Base
             file = media/sound/SEM_RadioChatter.ogg,
         }
     }
+
+    sound SEM_CrashBoom
+    {
+        category = UI,
+        master = Ambient,
+        clip
+        {
+            file = media/sound/SEM_CrashBoom.ogg,
+        }
+    }
 }

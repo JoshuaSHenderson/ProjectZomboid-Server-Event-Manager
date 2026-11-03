@@ -1,0 +1,79 @@
+/* Aircraft Crash wrecks. Static, wheel-less "vehicles" like vanilla's burnt cars, placed only by the Crash event (no zone spawns).
+
+   module Base like vanilla: a vehicle's model file is looked up by bare name, so the SEM_ prefix keeps the names unique.
+
+   Units. Meshes hold centimetres; model scale 0.01 gives metres. Every number below is metres BEFORE the vehicle scale
+   (model block "scale"), which multiplies all of them. The vehicle scale is the size knob. After changing it, update the
+   footprint radius in lua/server/SEM/Events/Crash.lua (WRECK.aircraft): the farthest mesh point from the origin along x or
+   y, times the scale, rounded up (helicopter 7.41, plane 29.88).
+
+   Collision. extents and physicsChassisShape are the solid box players bump into and the squares the wreck claims. They
+   cover only the main body (Josh 2026-11-02: a box round the whole mesh kept players away from the wreck); rotors, wings
+   and debris are walk-through. The box is centred on the mesh origin, so each mesh is exported with its origin on its body.
+
+   model offset y = half the mesh height (the mesh is centred on the origin; this stands it on the ground).
+   centerOfMassOffset y = half the collision box height (the box stands on the ground too).
+
+   Meshes, from Josh's models in docs/3dModels (Blender 3.6):
+     blender -b --python tools/convert-model.py -- src="<Crashed helicopter.glb>" out=<...>/SEM_CrashHeli.fbx
+       tex=<...>/SEM_CrashHeli.png keep=ALL imgs=Image_0,Image_4,Image_8 tris=12000 brighten=76
+     blender -b --python tools/convert-model.py -- src=<plane.glb> out=<...>/SEM_CrashPlane.fbx tex=<...>/SEM_CrashPlane.png
+       keep=CrashedPlane img=<plane_Base_color.png> rotate=54 shift=-7.2,-4.3 tris=6000
+   Helicopter mesh 9.43 x 2.87 x 14.82 m (three parts of one wreck joined, textures on one 2048 atlas, lifted to vanilla's
+   burnt-car brightness). Plane mesh 45.37 x 12.48 x 48.06 m, turned so its body runs along the length, origin on the body. */
+module Base
+{
+    model SEM_CrashHeli
+    {
+        mesh = vehicles/SEM_CrashHeli,
+        shader = vehicle,
+        static = true,
+        scale = 0.01,
+    }
+
+    model SEM_CrashPlane
+    {
+        mesh = vehicles/SEM_CrashPlane,
+        shader = vehicle,
+        static = true,
+        scale = 0.01,
+    }
+
+    vehicle SEM_CrashHeli
+    {
+        neverSpawnKey = true,
+        model
+        {
+            file = SEM_CrashHeli,
+            scale = 0.8,
+            offset = 0.0 1.435 0.0,
+        }
+        skin
+        {
+            texture = Vehicles/SEM_CrashHeli,
+        }
+        extents = 2.4 2.2 10.0,
+        mass = 5000,
+        centerOfMassOffset = 0.0 1.1 0.0,
+        physicsChassisShape = 2.4 2.2 10.0,
+    }
+
+    vehicle SEM_CrashPlane
+    {
+        neverSpawnKey = true,
+        model
+        {
+            file = SEM_CrashPlane,
+            scale = 0.45,
+            offset = 0.0 6.24 0.0,
+        }
+        skin
+        {
+            texture = Vehicles/SEM_CrashPlane,
+        }
+        extents = 6.4 5.0 19.5,
+        mass = 20000,
+        centerOfMassOffset = 0.0 2.5 0.0,
+        physicsChassisShape = 6.4 5.0 19.5,
+    }
+}

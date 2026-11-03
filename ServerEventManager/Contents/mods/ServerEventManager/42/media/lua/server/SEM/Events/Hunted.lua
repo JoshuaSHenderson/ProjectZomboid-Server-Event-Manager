@@ -26,7 +26,7 @@ local function sendGroup(run, o, p, count)
     local d = run.data
     local sq = Siege.waveSquare(p:getX(), p:getY(), o.spawnDistance)
     if not sq then return false end
-    local made, why = SEM.Compat_ALife.spawnHunters(p, sq:getX(), sq:getY(), 0, count, o.npcTier)
+    local made, why = SEM.Compat_ALife.spawnHunters(p, sq:getX(), sq:getY(), 0, count, o.npcTier, o.npcDifficulty, Spawn.weaponPack(o, run))
     if made == 0 then
         d.failed = (d.failed or 0) + 1
         if d.failed >= 3 and not d.want then SEM.Runner.fail(run, "A-Life refused the hunters: " .. tostring(why)) end

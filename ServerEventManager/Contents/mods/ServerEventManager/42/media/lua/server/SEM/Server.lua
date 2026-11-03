@@ -18,7 +18,7 @@ local function name(player)
 end
 
 -- commands that echo an optional reqId back as `ack` (docs/schedule-contract.md)
-local ACKED = { saveEvent = true, saveSchedule = true, saveLootPacks = true, savePacks = true, savePreset = true, renamePreset = true }
+local ACKED = { saveEvent = true, saveSchedule = true, saveLootPacks = true, savePacks = true, saveWeaponPacks = true, savePreset = true, renamePreset = true }
 
 local function validReqId(r)
     if type(r) == "string" then return #r >= 1 and #r <= 40 end
@@ -44,7 +44,17 @@ end
 -- Default is the event's own options (D39), never a stored preset
 local function isDefault(n) return n:lower() == "default" end
 
-local MAX_IMPORT = 1048576 -- 1 MiB of text in one sendClientCommand; ponytail: chunking is spike S11 if a real config outgrows it
+local MAX_IMPORT = 1048576 -- 1 MiB of text, all import parts together
+local PART, MAX_PARTS = 16000, 200 -- bytes per part (the engine caps a string at 32767); most parts of one import
+
+-- the Import / Export page clears "loading" only on its replies, so every failure on that page is a configError
+local function refuse(player, why)
+    print("[SEM] config refused for " .. name(player) .. ": " .. why)
+    sendServerCommand(player, MODULE, "configError", { text = why })
+    return nil, nil, true
+end
+
+local inbox = {} -- username -> { n, i, bytes, parts }: the import part sequence an admin has in flight
 
 local admin = {}
 
@@ -183,30 +193,49 @@ function admin.savePacks(player, args)
     Store.savePacks(packs)
 end
 
+function admin.saveWeaponPacks(player, args)
+    local ok, packs, errs = Store.validatePacks(args.packs, "weapon")
+    if not ok then return errs end
+    Store.saveWeaponPacks(packs)
+end
+
 -- replies to the requester only, never a broadcast
 function admin.getConfig(player)
     local text, err = SEM.Json.encode(Store.exportConfig())
-    if not text then return nil, { text = "Export failed: " .. tostring(err), bad = true } end
-    sendServerCommand(player, MODULE, "configExport", { text = text })
+    if not text then return refuse(player, "Export failed: " .. tostring(err)) end
+    local parts = SEM.chunks(text, PART)
+    for i, s in ipairs(parts) do sendServerCommand(player, MODULE, "configExportPart", { i = i, n = #parts, text = s }) end
     return nil, nil, true
 end
 
 function admin.importConfig(player, args)
-    local function refuse(why)
-        print("[SEM] importConfig refused for " .. name(player) .. ": " .. why)
-        sendServerCommand(player, MODULE, "configError", { text = why })
-        return nil, nil, true
-    end
-    if type(args.text) ~= "string" then return refuse("text: must be the exported text") end
-    if #args.text > MAX_IMPORT then return refuse("text: over 1 MiB") end
+    if type(args.text) ~= "string" then return refuse(player, "text: must be the exported text") end
+    if #args.text > MAX_IMPORT then return refuse(player, "text: over 1 MiB") end
     local tbl, err = SEM.Json.decode(args.text)
-    if tbl == nil then return refuse(err or "text: empty config") end
+    if tbl == nil then return refuse(player, err or "text: empty config") end
     local ok, why = Store.importConfig(tbl)
-    if not ok then return refuse(why) end
+    if not ok then return refuse(player, why) end
     for id in pairs(Store.config.schedules) do SEM.Scheduler.touch(id) end
     SEM.Runner.pushSnapshot()
     print("[SEM] importConfig applied by " .. name(player))
     return nil, { text = "Config imported" }
+end
+
+-- the client sends importConfig's text as parts 1..n in order; the first starts a fresh buffer, any error throws it away
+function admin.importConfigPart(player, args)
+    local who, i, n, text = name(player), args.i, args.n, args.text
+    local function bad(why) inbox[who] = nil; return refuse(player, why) end
+    local function count(v) return type(v) == "number" and v >= 1 and v % 1 == 0 end
+    if not (count(i) and count(n) and type(text) == "string") then return bad("part: needs whole numbers i and n, and text") end
+    if n > MAX_PARTS then return bad("part: n is at most " .. MAX_PARTS) end
+    if i == 1 then inbox[who] = { n = n, i = 0, bytes = 0, parts = {} } end
+    local b = inbox[who]
+    if not b or b.n ~= n or b.i + 1 ~= i then return bad("part: out of order") end
+    b.i, b.bytes, b.parts[i] = i, b.bytes + #text, text
+    if b.bytes > MAX_IMPORT then return bad("text: over 1 MiB") end
+    if i < n then return nil, nil, true end
+    inbox[who] = nil
+    return admin.importConfig(player, { text = table.concat(b.parts) })
 end
 
 function admin.forceEvent(player, args)
@@ -236,6 +265,8 @@ function public.hello(player)
     sendServerCommand(player, MODULE, "superState", SEM.Events.super.marks())
     sendServerCommand(player, MODULE, "eventFeed", { items = SEM.Runner.feed() })
     sendServerCommand(player, MODULE, "eventTags", SEM.Spawn.tagLists())
+    -- weapon packs of groups already spawned, for NPCs this client may come to own (shared/SEM/WeaponPacks.lua)
+    if SEM.WeaponPacks and not SEM.empty(SEM.WeaponPacks.armed) then sendServerCommand(player, MODULE, "armedAll", { groups = SEM.WeaponPacks.armed }) end
     local ok, err = pcall(SEM.Scheduler.hello)
     if not ok then print("[SEM] scheduler error on hello: " .. tostring(err)) end
 end
@@ -270,7 +301,7 @@ local function handle(module, command, player, args)
     elseif quiet then -- the command already replied
     else
         SEM.Runner.pushSnapshot(player, reqId)
-        if command == "saveEvent" or command == "saveLimits" or command == "saveSchedule" or command == "saveLootPacks" or command == "savePacks" or command == "renamePreset" then
+        if command == "saveEvent" or command == "saveLimits" or command == "saveSchedule" or command == "saveLootPacks" or command == "savePacks" or command == "saveWeaponPacks" or command == "renamePreset" then
             print("[SEM] " .. command .. " saved by " .. name(player))
             sendServerCommand(player, MODULE, "notice", { text = "Saved" })
         end
@@ -285,6 +316,10 @@ Events.OnClientCommand.Add(function(module, command, player, args)
         pcall(function()
             if module == MODULE and SEM.isAdmin(player) then
                 sendServerCommand(player, MODULE, "notice", { text = "Server error in " .. tostring(command) .. ", see server log", bad = true })
+                if command == "getConfig" or command == "importConfigPart" then
+                    inbox[name(player)] = nil
+                    sendServerCommand(player, MODULE, "configError", { text = "Server error, see server log" })
+                end
             end
         end)
     end

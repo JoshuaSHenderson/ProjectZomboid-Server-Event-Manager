@@ -61,10 +61,38 @@ function Fmt.inText(m)
     return r .. "m"
 end
 
-function Fmt.nextText(n)
+-- D52: a server minute of the day as the client sees it, given each side's offset from UTC in minutes. Returns the minute and how
+-- many days it moved (-1, 0 or 1). A missing offset leaves the time alone.
+function Fmt.localTime(min, serverOffset, clientOffset)
+    local t = min + (clientOffset or 0) - (serverOffset or 0)
+    return t % 1440, math.floor(t / 1440)
+end
+
+function Fmt.localClock(c, serverOffset, clientOffset)
+    local m, d = Fmt.localTime(c.hour * 60 + c.minute, serverOffset, clientOffset)
+    return { dow = (c.dow - 1 + d) % 7 + 1, hour = math.floor(m / 60), minute = m % 60 }
+end
+
+-- " [Sat 01:00]" for a server weekday and minute; empty when the offsets are missing or equal
+local function localBracket(dow, min, serverOffset, clientOffset)
+    if not (serverOffset and clientOffset) or serverOffset == clientOffset then return "" end
+    local m, d = Fmt.localTime(min, serverOffset, clientOffset)
+    return " [" .. Fmt.DAYS[(dow - 1 + d) % 7 + 1] .. " " .. Fmt.hhmm(m) .. "]"
+end
+
+-- a server string like "Fri 22:00" with the client's own time added; any other text (OPEN NOW, Pending, a game day) is returned as it is
+function Fmt.localStamp(text, serverOffset, clientOffset)
+    local d, h, m = tostring(text):match("^(%a%a%a) (%d%d):(%d%d)$")
+    for i, name in ipairs(Fmt.DAYS) do
+        if name == d then return text .. localBracket(i, h * 60 + m, serverOffset, clientOffset) end
+    end
+    return text
+end
+
+function Fmt.nextText(n, serverOffset, clientOffset)
     if not n then return "none" end
     if n.inMinutes <= 0 then return "OPEN NOW" end
-    return Fmt.DAYS[n.dow] .. " " .. Fmt.hhmm(n.startMin) .. " (in " .. Fmt.inText(n.inMinutes) .. ")"
+    return Fmt.DAYS[n.dow] .. " " .. Fmt.hhmm(n.startMin) .. " (in " .. Fmt.inText(n.inMinutes) .. ")" .. localBracket(n.dow, n.startMin, serverOffset, clientOffset)
 end
 
 function Fmt.overnight(w) return w.endMin <= w.startMin end

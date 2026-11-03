@@ -4,7 +4,7 @@ SEM = SEM or {}
 SEM.Config = {
     MODULE = "ServerEventManager",
     VERSION = 1,
-    SCHEMA = 3,                -- saved config layout; Store.migrate upgrades older ones
+    SCHEMA = 6,                -- saved config layout; Store.migrate upgrades older ones
     CONFIG_KEY = "ServerEventManager.Config",
     WORLD_KEY = "ServerEventManager.World",
     MAX_ZOMBIES_PER_EVENT = 200,
@@ -44,7 +44,14 @@ SEM.Config = {
     SUPER_RING = 10,           -- tiles around the site the Super Zombies spread over
     SIEGE_NEAR = 100,          -- a siege wave waits until a player is this close to the base
     SIEGE_RADIUS = 24,         -- spread of a siege wave's spawn, as A-Life's own raid waves
-    STRANGER_NEAR = 40,        -- a player this close to the stranger has arrived, and counts for the reward
+    TAKEOVER_MAX = 20,         -- D49: overrun bases waiting for a player to load them; the oldest is dropped past it
+    TAKEOVER_RADIUS = 15,      -- a taken base with no known rectangle is this many tiles each way around its centre
+    TAKEOVER_SCAN = 4000,      -- most squares a takeover looks through for containers
+    TAKEOVER_SLICE = 400,      -- squares looked through per tick
+    TAKEOVER_FLOORS = 3,       -- floors from the ground up that the loot scan covers
+    TAKEOVER_ENERGY = 10,      -- fire strength of a takeover fire (a small one)
+    TAKEOVER_BURN = 180,       -- real seconds before a takeover's fires are put out
+    STRANGER_NEAR = 40,       -- a player this close to the stranger has arrived, and counts for the reward
     STRANGER_RING = 14,        -- tiles around the stranger the wave spawns over
     HUNT_REACH = 100,          -- with no hunter this close, the player got away for now
     EVENT_AREA = 100,          -- with no player this close to an event's site and targets, its Leave Minutes run. Inside the ground the server keeps loaded
@@ -141,10 +148,34 @@ SEM.Config.VEHICLE_PACKS = {
     { name = "Luxury and Off-Road", vehicles = base({ "CarLuxury", "SportsCar", "SUV", "OffRoad" }) },
 }
 
+-- Weapon packs arm hostile A-Life NPCs: each NPC gets one gun and one melee weapon from the pack (Compat_ALife), ammo rounds
+-- for the gun. Seeded once (weaponPacksSeeded), like the others.
+SEM.Config.WEAPON_PACKS = {
+    { name = "Handguns", ammo = 45, weapons = base({ "Pistol", "Pistol2", "Pistol3", "Revolver", "Revolver_Short", "KitchenKnife", "HuntingKnife" }) },
+    { name = "Shotguns", ammo = 24, weapons = base({ "Shotgun", "ShotgunSawnoff", "DoubleBarrelShotgun", "Axe", "Crowbar" }) },
+    { name = "Hunters", ammo = 30, weapons = base({ "HuntingRifle", "VarmintRifle", "HuntingKnife", "Machete" }) },
+    { name = "Military", ammo = 120, weapons = base({ "AssaultRifle", "AssaultRifle2", "Pistol", "HuntingKnife" }) },
+    { name = "Melee Only", ammo = 0, weapons = base({ "Axe", "BaseballBat", "Crowbar", "Machete", "Katana", "Sledgehammer", "SpearCrafted" }) },
+}
+
 -- ponytail: PZ Lua has no usable next(), tests/run.lua removes it to catch regressions
 function SEM.empty(t)
     for _ in pairs(t) do return false end
     return true
+end
+
+-- Cuts text into pieces of at most size bytes (at least one), none ending inside a UTF-8 character, so concatenating them
+-- gives the text back. A string in a network command is capped at 32767 bytes.
+function SEM.chunks(text, size)
+    local out, i, n = {}, 1, #text
+    repeat
+        local j = math.min(i + size - 1, n)
+        while j < n and j >= i and text:byte(j + 1) >= 0x80 and text:byte(j + 1) < 0xC0 do j = j - 1 end -- next byte continues a character
+        if j < i then j = math.min(i + size - 1, n) end -- no boundary in reach (not UTF-8): cut anyway
+        out[#out + 1] = text:sub(i, j)
+        i = j + 1
+    until i > n
+    return out
 end
 
 function SEM.isAdmin(player)

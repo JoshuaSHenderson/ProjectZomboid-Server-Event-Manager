@@ -239,15 +239,34 @@ function mode.randomJeemBase(o)
     return clear({ x = b.x, y = b.y, z = b.z or 0 }, o)
 end
 
--- every base that exists now: { id, label, kind, x, y, offline }. kind = safehouse, jeem or home. id is what Horde and Siege
--- look a base up by; the console shows this list in its base picker.
+-- Pure. The box around every area { id, x1, y1, x2, y2 } of one base id, or nil when it has none
+function Targets.unionRect(areas, id)
+    local r
+    for _, a in ipairs(areas or {}) do
+        if a.id == id then
+            r = r or { x1 = a.x1, y1 = a.y1, x2 = a.x2, y2 = a.y2 }
+            r.x1, r.y1, r.x2, r.y2 = math.min(r.x1, a.x1), math.min(r.y1, a.y1), math.max(r.x2, a.x2), math.max(r.y2, a.y2)
+        end
+    end
+    return r
+end
+
+-- every base that exists now: { id, label, kind, x, y, rect, offline }. kind = safehouse, jeem or home. id is what Horde and Siege
+-- look a base up by; the console shows this list in its base picker. rect = { x1, y1, x2, y2 } when known (a home has none).
 function Targets.bases()
     local out = {}
     for _, s in ipairs(Targets.safehouses()) do
-        out[#out + 1] = { id = s.id, label = s.id .. " (" .. s.owner .. ")", kind = "safehouse", x = s.x, y = s.y, offline = s.offline }
+        local rect
+        if s.w > 0 and s.h > 0 then
+            local x1, y1 = s.x - math.floor(s.w / 2), s.y - math.floor(s.h / 2) -- x, y is the centre
+            rect = { x1 = x1, y1 = y1, x2 = x1 + s.w - 1, y2 = y1 + s.h - 1 }
+        end
+        out[#out + 1] = { id = s.id, label = s.id .. " (" .. s.owner .. ")", kind = "safehouse", x = s.x, y = s.y, rect = rect, offline = s.offline }
     end
+    local areas = SEM.Compat_ALife.baseAreas()
     for _, b in ipairs(Targets.jeem() or {}) do
-        out[#out + 1] = { id = tostring(b.id), label = "Jeem base " .. tostring(b.id), kind = "jeem", x = b.x, y = b.y, offline = b.offline }
+        out[#out + 1] = { id = tostring(b.id), label = "Jeem base " .. tostring(b.id), kind = "jeem", x = b.x, y = b.y,
+            rect = Targets.unionRect(areas, tostring(b.id)), offline = b.offline }
     end
     for _, h in ipairs(Targets.homes() or {}) do
         out[#out + 1] = { id = h.id, label = "A-Life home " .. h.id, kind = "home", x = h.x, y = h.y, offline = h.offline }
@@ -257,8 +276,7 @@ end
 
 -- anchor as in nearRandomPlayer: with everyone offline the search runs around where a player stood at the announcement (D16)
 function mode.countryside(o, anchor)
-    local list = Targets.eligible(o)
-    if #list == 0 and #Targets.players() > 0 then return nil, "no player is at least " .. o.minAgeDays .. " days old" end
+    local list = Targets.players() -- Minimum Age does not apply here
     if #list == 0 and not anchor then return nil, "no players online to search around" end
     local b = Targets.bounds()
     for _ = 1, C.SAMPLES do
@@ -278,6 +296,7 @@ end
 -- modes that pick a fresh random point each call, so asking again can find a better one; map, safehouse and base
 -- modes name one place, which a class preference never overrides
 local RANDOM_MODES = { town = true, countryside = true, nearRandomPlayer = true, nearChosenPlayer = true }
+Targets.RANDOM_MODES = RANDOM_MODES
 
 -- Keeps first when it is of the preferred class, else asks sample() up to tries times for a point of that class and falls
 -- back to first. classOf(p) gives the class name. Pure: specs call it with stubs.

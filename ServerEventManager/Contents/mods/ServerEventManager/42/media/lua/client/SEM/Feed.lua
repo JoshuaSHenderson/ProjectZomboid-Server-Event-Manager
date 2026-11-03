@@ -124,6 +124,7 @@ function Feed.new(x, y, w, h, kind)
     v.onMouseDown = function(s, mx, my)
         for _, hit in ipairs(s.hits) do
             if mx >= hit.x and mx <= hit.x + hit.w and my >= hit.y and my <= hit.y + hit.h then
+                T.click()
                 if hit.go then
                     SendCommandToServer(string.format("/teleportto %d,%d,0", hit.go.x, hit.go.y))
                 else

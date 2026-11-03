@@ -13,13 +13,20 @@ cp -r ServerEventManager/Contents/mods/ServerEventManager "$CACHE/mods/"
 # SEM_SELFTEST=1: also runs tests/selftest.lua inside real PZ Lua at server start; results print as [SEM-TEST]
 [ -n "$SEM_SELFTEST" ] && cp tests/selftest.lua "$CACHE/mods/ServerEventManager/42/media/lua/server/SEM/ZSelfTest.lua"
 MODS="ServerEventManager${1:+;$1}"
-if [ -n "$SEM_ALIFE" ]; then  # SEM_ALIFE=1: also load A-Life + Jimmy from the Workshop folder (copied, not linked)
-  WS="/d/SteamLibrary/steamapps/workshop/content/108600"
-  for m in 3803984183/mods/ProjectALifeNPCs 3806944055/mods/ProjectALifeJimmy; do
-    [ -d "$CACHE/mods/$(basename "$m")" ] || cp -r "$WS/$m" "$CACHE/mods/"
-  done
-  MODS="$MODS;ProjectALifeNPCs;ProjectALifeJimmy"
-fi
+# Workshop mods copied fresh every boot (not linked), so the rig never runs an older copy than Steam has. On by default, as on
+# the live server: SEM_ALIFE=0 drops A-Life and its Jeem Extension (ProjectALifeJimmy); SEM_VIEWPOINT=0 drops ZombieBuddy and
+# Viewpoint (first-person view; a client Java mod, so tools/test-client.sh starts the ZombieBuddy agent).
+WS="/d/SteamLibrary/steamapps/workshop/content/108600"
+EXTRA=""
+[ "${SEM_VIEWPOINT:-1}" != 0 ] && EXTRA="$EXTRA 3619862853/mods/ZombieBuddy 3809306528/mods/Viewpoint"
+[ "${SEM_ALIFE:-1}" != 0 ] && EXTRA="$EXTRA 3803984183/mods/ProjectALifeNPCs 3806944055/mods/ProjectALifeJimmy"
+for m in $EXTRA; do
+  [ -d "$WS/$m" ] || { echo "missing Workshop mod $WS/$m: subscribe in Steam, or turn it off (SEM_ALIFE=0 / SEM_VIEWPOINT=0)" >&2; exit 1; }
+  rm -rf "$CACHE/mods/$(basename "$m")"
+  cp -r "$WS/$m" "$CACHE/mods/"
+  MODS="$MODS;$(basename "$m")"
+done
+echo "Mods=$MODS"
 if [ -f "$CACHE/Server/SEMTest.ini" ]; then
   sed -i "s/^Mods=.*/Mods=$MODS/" "$CACHE/Server/SEMTest.ini"
 else

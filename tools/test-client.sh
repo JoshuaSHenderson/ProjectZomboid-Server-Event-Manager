@@ -13,8 +13,9 @@ cp -r "${SEM_HOME:-$ROOT/.testserver}/Zomboid/mods"/* "$HOME_DIR/Zomboid/mods/"
 W_HOME="$(cygpath -w "$HOME_DIR")"
 echo "Join: IP 127.0.0.1  port 16261  $( [ "$N" = 1 ] && echo 'user admin / password semtest' || echo 'any other username, any password' )"
 cd "$GAME"
-# flags from ProjectZomboid64.json (agentlib:zbNative and steam flag dropped: -nosteam)
-exec ./jre64/bin/java.exe --enable-native-access=ALL-UNNAMED \
+# flags from ProjectZomboid64.json (steam flag dropped: -nosteam). -agentlib:zbNative is the ZombieBuddy agent, which loads
+# Java mods such as Viewpoint; it asks once per new jar in a native dialog.
+exec ./jre64/bin/java.exe -agentlib:zbNative --enable-native-access=ALL-UNNAMED \
   --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED \
   -XX:+UseG1GC -XX:-CreateCoredumpOnCrash -XX:-OmitStackTraceInFastThrow -Xmx4096m \
   "-Duser.home=$W_HOME" "-Ddeployment.user.cachedir=$W_HOME\Zomboid" \

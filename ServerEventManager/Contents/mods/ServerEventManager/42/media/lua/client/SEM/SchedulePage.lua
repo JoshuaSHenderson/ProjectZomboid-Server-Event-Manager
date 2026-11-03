@@ -57,6 +57,9 @@ function P.summary(sc)
     elseif sc.mode == "scheduledGame" then
         local n = tonumber(sc.everyDays) or 1
         return "Every " .. (n == 1 and "game day" or (n .. " game days")) .. " at " .. F.hhmm((tonumber(sc.atHour) or 0) * 60)
+    elseif sc.mode == "onceGame" then
+        local n = tonumber(sc.afterHours) or 1
+        return "Once, in " .. n .. (n == 1 and " game hour" or " game hours")
     elseif sc.mode == "real" then
         local w = sc.windows and sc.windows[1]
         if not w then return "Real-World, no windows" end
@@ -261,7 +264,8 @@ function P.list(c, f, view, y)
     local LEAD, TRAIL, GAP = 24, 36, 6
     local rh = math.max(RH, T.fh() + 8)
     local nxtW = 40
-    for _, r in ipairs(list) do nxtW = math.max(nxtW, T.tw(tostring(r.s.next or "-")) + 4) end
+    local function nextOf(s) return F.localStamp(tostring(s.next or "-"), Net.offsets()) end -- D52
+    for _, r in ipairs(list) do nxtW = math.max(nxtW, T.tw(nextOf(r.s)) + 4) end
     local x0 = 12 + LEAD
     local body = math.max(100, vw - 36 - TRAIL - x0 + 12) - nxtW -- shared by the four text columns
     local share = { name = 22, sched = 38, ev = 18, pre = 22 }
@@ -309,6 +313,7 @@ function P.list(c, f, view, y)
         local i = math.floor((my - top) / rh) + 1
         local r = rows[i]
         if r and not r.head then
+            T.click()
             c.schedSel = r.id
             c:updateButtons()
         end
@@ -339,7 +344,7 @@ function P.list(c, f, view, y)
                 T.text(view, T.fit(eventTitle(s.eventId), W.ev), X.ev, yy, tc)
                 local pre = (s.preset and s.preset ~= "") and s.preset or USE_SAVED
                 T.text(view, T.fit(pre, W.pre), X.pre, yy, tc)
-                T.text(view, T.fit(tostring(s.next or "-"), W.nxt), X.nxt, yy, tc)
+                T.text(view, T.fit(nextOf(s), W.nxt), X.nxt, yy, tc)
             end
         end
     end

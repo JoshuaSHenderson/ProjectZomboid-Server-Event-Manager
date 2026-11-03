@@ -134,6 +134,9 @@ function Theme.scroller(x, y, w, h)
     return p
 end
 
+-- custom hit-tests make no sound of their own; vanilla buttons, tick boxes and combos already do
+function Theme.click() getSoundManager():playUISound("UIActivateButton") end
+
 function Theme.btn(label, x, y, w, target, fn, arg)
     local b = ISButton:new(x, y, math.max(w, Theme.tw(label) + 16), Theme.bh(), label, target, fn)
     b:initialise()

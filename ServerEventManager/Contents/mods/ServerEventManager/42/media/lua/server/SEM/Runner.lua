@@ -13,6 +13,7 @@ require "SEM/Events/Convoy"
 require "SEM/Events/Super"
 require "SEM/Events/Siege"
 require "SEM/Events/Hunted"
+require "SEM/Events/Crash"
 require "SEM/Events/Stranger"
 
 local C, MODULE, Store = SEM.Config, SEM.Config.MODULE, SEM.Store
@@ -46,10 +47,20 @@ local function send(to, cmd, args)
     end
 end
 function Runner.toAdmins(cmd, args) send("admins", cmd, args) end
-function Runner.toAll(cmd, args) send("all", cmd, args) end
+-- false when the run an alert belongs to has Show Notifications off; every banner goes through toAll or toNear
+function Runner.notifies(cmd, args)
+    if cmd ~= "alert" or type(args) ~= "table" or args.id == nil then return true end
+    local run = SEM.Store.world and SEM.Store.world.runs[tostring(args.id)]
+    return not (run and type(run.options) == "table" and run.options.notifyOn == false)
+end
+
+function Runner.toAll(cmd, args)
+    if Runner.notifies(cmd, args) then send("all", cmd, args) end
+end
 
 -- to the players within range tiles of x, y
 function Runner.toNear(x, y, range, cmd, args)
+    if not Runner.notifies(cmd, args) then return end
     for _, p in ipairs(SEM.Targets.players()) do
         local dx, dy = p:getX() - x, p:getY() - y
         if dx * dx + dy * dy <= range * range then sendServerCommand(p, MODULE, cmd, args) end
@@ -136,7 +147,7 @@ function Runner.feed()
             e.left = math.max(0, r.barAt - now)
         elseif r.state == "warning" then
             e.left = math.max(0, r.warnEnds - now)
-        elseif r.state == "active" and r.elapsed and not SEM.Events[r.eventId].endless then
+        elseif r.state == "active" and r.elapsed and SEM.Events[r.eventId] and not SEM.Events[r.eventId].endless then
             local seen = math.min(math.max(now - (r.lastSeen or now), 0), MAX_STEP) -- elapsed is stale by up to a minute
             e.left = math.max(0, r.options.durationMinutes * 60 - r.elapsed - seen)
         end
@@ -185,9 +196,12 @@ function Runner.logSkip(eventId, scheduleName, reason)
     push()
 end
 
-local function liveRuns()
+-- D55: a run whose event module is not loaded is left out, except for Runner.init, which fails it (all)
+local function liveRuns(all)
     local out = {}
-    for _, r in pairs(Store.world.runs) do if type(r) == "table" and LIVE[r.state] then out[#out + 1] = r end end
+    for _, r in pairs(Store.world.runs) do
+        if type(r) == "table" and LIVE[r.state] and (all or SEM.Events[r.eventId]) then out[#out + 1] = r end
+    end
     table.sort(out, function(a, b) return a.id < b.id end)
     return out
 end
@@ -252,7 +266,9 @@ end
 
 -- returns a note to append to the end reason, or nil
 local function stopEvent(run, why)
-    local ok, note = pcall(SEM.Events[run.eventId].stop, run, why)
+    local mod = SEM.Events[run.eventId]
+    if not mod then return nil end
+    local ok, note = pcall(mod.stop, run, why)
     if not ok then
         print("[SEM] stop error in run " .. run.id .. ": " .. tostring(note))
         return "cleanup error, see server log"
@@ -290,8 +306,13 @@ end
 -- what clients need to draw a run's marker and say what it is on hover
 function Runner.markerArgs(run)
     local m, def = run.marker, SEM.EventDefs.byId[run.eventId]
-    return { id = run.id, x = m.x, y = m.y, radius = m.radius, exact = m.exact, title = run.options.title, radio = run.options.requireRadio,
+    local a = { id = run.id, x = m.x, y = m.y, radius = m.radius, exact = m.exact, title = run.options.title, radio = run.options.requireRadio,
         event = def and def.title, text = Runner.startText(run) }
+    if run.options.markerRadioExact then -- D53: the true spot, for clients that carry a radio
+        local at = run.exact or run
+        a.exactX, a.exactY = at.x, at.y
+    end
+    return a
 end
 
 local function sendMarker(run)
@@ -383,7 +404,7 @@ local function activate(run)
     local ok, err = pcall(SEM.Events[run.eventId].start, run)
     if not ok then return Runner.fail(run, "start error: " .. tostring(err)) end
     if run.state ~= "active" then return end
-    if mod.ownSite and run.x then makeMarker(run) end
+    if mod.ownSite and run.x and not run.marker then makeMarker(run) end -- a previewed marker keeps its circle
     if run.x and not run.exact then sendExact(run, run.x, run.y) end -- unless start already moved it (crateLanded)
     if run.marker then sendMarker(run) end
     Runner.toAll("alert", { id = run.id, title = o.title, message = Runner.startText(run), sound = o.soundOn, radio = o.requireRadio })
@@ -416,12 +437,31 @@ function Runner.resolveRandom(eventId, opts, rand)
             out[f.key] = opts[f.key]
         end
     end
-    -- D35: a random guard type also rolls how many, between guardMin and guardMax (tier and sprinter % come from the options)
-    if guardRandom and opts.guardMin and opts.guardMax then
-        local lo, hi = opts.guardMin, math.max(opts.guardMin, opts.guardMax)
-        local key = opts.guardType == "npc" and "npcCount" or "guardCount"
-        opts[key] = math.min(10, lo + rand(hi - lo + 1))
+    -- D35, D51: a random guard type also rolls how many, between the min and max of the type it picked (tier and sprinter % come from the options)
+    local npc = opts.guardType == "npc"
+    local lo, hi = opts[npc and "guardNpcMin" or "guardZombieMin"], opts[npc and "guardNpcMax" or "guardZombieMax"]
+    if guardRandom and lo and hi then
+        local key = npc and "npcCount" or "guardCount"
+        opts[key] = math.min(npc and 10 or 500, lo + rand(math.max(lo, hi) - lo + 1))
         out[key] = opts[key]
+    end
+    return out
+end
+
+-- D50: the option values that are counts; NPC ones stop at 10. guardCount and npcCount only matter for their own guard type.
+local ZOMBIE_COUNTS, NPC_COUNTS = { "guardCount", "size", "count", "zombies", "fallbackCount", "zombieAttackers" }, { "npcCount", "groupSize", "attackers", "hunters" }
+local ONLY_FOR = { guardCount = "zombies", npcCount = "npc" }
+
+-- scales those counts for the players online (extraPerPlayerPct); returns { key = new value } for what changed
+function Runner.scaleCounts(opts, players)
+    local out, pct = {}, opts.extraPerPlayerPct or 0
+    for cap, keys in pairs({ [500] = ZOMBIE_COUNTS, [10] = NPC_COUNTS }) do
+        for _, k in ipairs(keys) do
+            if pct > 0 and opts[k] and (not ONLY_FOR[k] or opts.guardType == ONLY_FOR[k]) then
+                local n = math.min(cap, SEM.scaleCount(opts[k], pct, players))
+                if n > opts[k] then opts[k], out[k] = n, n end
+            end
+        end
     end
     return out
 end
@@ -441,9 +481,19 @@ end
 function Runner.begin(eventId, source, optionsOverride, scheduleName, forced)
     if not Store.world then Store.init() end
     local cfg, mod = Store.config.events[eventId], SEM.Events[eventId]
+    if SEM.EventDefs.byId[eventId] and not mod then
+        print("[SEM] event '" .. eventId .. "' has no server module; not started")
+        return nil, "event mod not loaded"
+    end
     if not (cfg and mod) then return nil, "this event type is not built yet" end
+    -- a mod's event that dropped durationMinutes without endless would error in update every minute
+    if not mod.endless and type(cfg.options.durationMinutes) ~= "number" then
+        print("[SEM] event '" .. eventId .. "' has no durationMinutes and its module is not endless; not started")
+        return nil, "event has no durationMinutes and is not endless"
+    end
     local opts = copy(optionsOverride or cfg.options)
     local resolved = Runner.resolveRandom(eventId, opts, ZombRand)
+    for k, v in pairs(Runner.scaleCounts(opts, #SEM.Targets.players())) do resolved[k] = v end
     local id = Store.world.nextRunId
     Store.world.nextRunId = id + 1
     local run = { id = id, eventId = eventId, source = source, schedule = scheduleName, title = opts.title, options = opts, resolved = resolved, data = {}, state = "pending", anchor = anchorOf() }
@@ -465,6 +515,18 @@ function Runner.begin(eventId, source, optionsOverride, scheduleName, forced)
             radio = opts.requireRadio, message = opts.message .. " Arrives in " .. lead .. " min." })
         run.warnEnds = Runner.clock() + lead * 60
         setState(run, "warning")
+        -- an event that knows its site before it starts (Under Siege's base) shows the marker during the warning
+        if mod.preview then
+            local ok, x, y = pcall(mod.preview, run)
+            if ok and x then
+                run.x, run.y, run.z = x, y, 0
+                makeMarker(run)
+                sendExact(run, x, y)
+                if run.marker then sendMarker(run) end
+            elseif not ok then
+                print("[SEM] run " .. id .. " preview error: " .. tostring(x))
+            end
+        end
     else
         activate(run)
     end
@@ -605,8 +667,10 @@ end
 -- after a restart: warning and active runs carry on, nothing is placed twice
 function Runner.init()
     if not Store.world then Store.init() end
-    for _, run in ipairs(liveRuns()) do
-        if run.state == "pending" then
+    for _, run in ipairs(liveRuns(true)) do
+        if not SEM.Events[run.eventId] then
+            Runner.fail(run, "event mod not loaded")
+        elseif run.state == "pending" then
             Runner.fail(run, "interrupted by a restart")
         elseif run.state == "ending" then
             setState(run, "ended", "finished during a restart")

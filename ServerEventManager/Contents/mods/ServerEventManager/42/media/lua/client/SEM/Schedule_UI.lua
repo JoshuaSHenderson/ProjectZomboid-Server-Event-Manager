@@ -12,15 +12,15 @@ SEM.ScheduleUI = S
 
 local MAX_WINDOWS = 8
 local LX = 12
-local MODES = { "off", "randomGame", "scheduledGame", "real" }
-local RANDOM, TIMED = "Random Game Time", "Scheduled Game Time"
+local MODES = { "off", "randomGame", "scheduledGame", "real", "onceGame" }
+local RANDOM, TIMED, ONCE = "Random Game Time", "Scheduled Game Time", "Once, After Game Hours"
 local WINDOWS_HELP = "Days and hours (server clock) when the event may fire. Each row is one window; an end before the start runs overnight. Up to 8 windows."
 
 -- same ranges as the server; the server revalidates every save
 S.SCHEMA = {
     { key = "mode", type = "enum", choices = MODES, default = "off",
-      labels = { randomGame = RANDOM, scheduledGame = TIMED, real = "Real-World Window" },
-      help = "When the event fires by itself. Off means only Force Now. Pick one mode; they never run together." },
+      labels = { randomGame = RANDOM, scheduledGame = TIMED, real = "Real-World Window", onceGame = ONCE },
+      help = "When the event fires by itself. Off means only Force Now. Once, After Game Hours fires one time and then turns the entry off, handy for testing a schedule. Pick one mode; they never run together." },
     { key = "minDays", type = "int", min = 0, max = 60, default = 1, group = RANDOM,
       help = "Shortest wait between runs, in game days. 1 to 3 days feels regular." },
     { key = "maxDays", type = "int", min = 0, max = 60, default = 3, group = RANDOM,
@@ -35,12 +35,14 @@ S.SCHEMA = {
       help = "Runs once every this many game days. 7 is weekly." },
     { key = "atHour", type = "int", min = 0, max = 23, default = 20, group = TIMED,
       help = "Game hour of day the run starts, 0 to 23. 20 is 8 pm in game." },
+    { key = "afterHours", type = "int", min = 1, max = 72, default = 1, group = ONCE,
+      help = "Game hours from saving or enabling the entry until it fires, once. 1 is about 2 to 3 real minutes at default speed." },
 }
 
-local RAND, SCHED, COND = {}, {}, {}
+local RAND, SCHED, ONCEF, COND = {}, {}, {}, {}
 for i = 2, #S.SCHEMA do
     local f = S.SCHEMA[i]
-    table.insert(f.group == RANDOM and RAND or SCHED, f)
+    table.insert(f.group == RANDOM and RAND or f.group == ONCE and ONCEF or SCHED, f)
 end
 for _, f in ipairs(SEM.Conditions.schema) do
     local c = F.copy(f)
@@ -106,7 +108,7 @@ local function windows(form, sched, y, clockFn)
     table.insert(form.heads, { head, y })
     y = form:para(WINDOWS_HELP, y + 24)
     table.insert(form.marks, { function() return "SERVER " .. F.clockText(clockFn()) end, LX, y, T.c.amber })
-    table.insert(form.marks, { function() return "NEXT " .. F.nextText(S.nextOpen(sched, clockFn())) end, LX + 150, y, T.c.green })
+    table.insert(form.marks, { function() return "NEXT " .. F.nextText(S.nextOpen(sched, clockFn()), SEM.Net.offsets()) end, LX + 150, y, T.c.green })
     y = y + 24
     for i, w in ipairs(ws) do
         local key = "schedule.windows." .. i
@@ -123,9 +125,15 @@ local function windows(form, sched, y, clockFn)
         table.insert(form.marks, { function()
             return F.overnight(w) and SEM.t("overnight", "Overnight, ends next day") or ""
         end, LX + 256, y + 3, T.c.hot })
+        table.insert(form.marks, { function() -- D52
+            local so, co = SEM.Net.offsets()
+            if not so then return "" end
+            local a, b = F.localTime(w.startMin or 0, so, co), F.localTime(w.endMin or 0, so, co)
+            return "[YOURS " .. F.hhmm(a) .. " - " .. F.hhmm(b) .. "]"
+        end, LX, y + 30 + T.fh(), T.c.hot }) -- its own row, under the window's error line
         form:button("X", LX + 440, y, 24, function() table.remove(ws, i); form.onChange(true) end)
         form:label("", y + 26, key, LX, y + 26)
-        y = y + 48
+        y = y + 38 + 2 * T.fh()
     end
     if #ws < MAX_WINDOWS then
         form:button("Add window", LX, y, 100, function()
@@ -164,6 +172,7 @@ function S.build(form, sched, cond, y, clockFn, noOff)
     y = y + 32
     if sched.mode == "randomGame" then y = form:addFields(RAND, sched, y, "schedule")
     elseif sched.mode == "scheduledGame" then y = form:addFields(SCHED, sched, y, "schedule")
+    elseif sched.mode == "onceGame" then y = form:addFields(ONCEF, sched, y, "schedule")
     elseif sched.mode == "real" then y = windows(form, sched, y, clockFn) end
     return form:addFields(COND, cond, y, "conditions")
 end

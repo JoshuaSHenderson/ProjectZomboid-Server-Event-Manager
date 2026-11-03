@@ -118,7 +118,7 @@ local function place(run, o)
     local what, made = nil, 0
     if SEM.Compat_ALife.available() then
         local why, kind
-        made, why, kind = SEM.Compat_ALife.spawnCamp(Spawn.nearestPlayer(x, y), x, y, z, o.groupSize, o.npcTier, o.guardLeash)
+        made, why, kind = SEM.Compat_ALife.spawnCamp(Spawn.nearestPlayer(x, y), x, y, z, o.groupSize, o.npcTier, o.guardLeash, o.npcDifficulty, Spawn.weaponPack(o, run))
         if made > 0 then
             d.want, d.uids, d.dead, d.claimUntil = made, {}, {}, SEM.Runner.clock() + C.CAMP_CLAIM
             hookALife()

@@ -182,8 +182,9 @@ end
 -- around it), each filled from Spawn.lootFor(o), with smoke when asked. Saves run.data.crates, moves run.x,y onto the first
 -- crate and the marker with it (Runner.crateLanded), and warns about skipped loot ids and crates that did not fit.
 -- Returns the squares: empty when nothing fit, and then nothing was placed.
-function Spawn.placeCrates(run, o, count, smoke)
-    local sites, used = {}, {}
+function Spawn.placeCrates(run, o, count, smoke, used)
+    local sites = {}
+    used = used or {} -- optional "x,y" set the caller has claimed (Crash reserves its aircraft footprint)
     for i = 1, count do
         local first = sites[1]
         local sq
@@ -217,9 +218,56 @@ function Spawn.placeCrates(run, o, count, smoke)
     return sites
 end
 
+local function itemExists(t) return getScriptManager():FindItem(t) ~= nil end
+
+-- One crate's worth of loot without a crate: a roll of the event's pack as { item, count } rows, with the warnings
+-- placeCrates gives (pack gone, unknown ids, medium tier stand-in). For loot that goes where the event puts it.
+function Spawn.rollItems(run, o)
+    local rows, gone = Spawn.lootFor(o)
+    if gone then SEM.Runner.warn(run, "loot pack " .. table.concat(o.lootPack, ", ") .. " not found, using the built-in list") end
+    local rolled, skipped, medium = Spawn.rollCrate(rows, ZombRand, itemExists)
+    if medium then SEM.Runner.warn(run, "no valid item in the loot table, using the medium tier") end
+    if #skipped > 0 then table.sort(skipped); SEM.Runner.warn(run, "unknown loot items skipped: " .. table.concat(skipped, ", ")) end
+    return rolled
+end
+
+-- Loot on the ground: one roll (Spawn.rollItems), each row on its own square from squares (taken in order, reused when
+-- they run out), every item tagged modData.semRunId. Saves run.data.ground, which Spawn.cratesEmpty and Wildfire's fire
+-- scans read like crates. Returns the squares used: empty when nothing was placed. Left in the world when the event ends.
+function Spawn.scatterLoot(run, o, squares)
+    local used, seen = {}, {}
+    if #squares == 0 then return used end
+    run.data.ground = {}
+    for i, r in ipairs(Spawn.rollItems(run, o)) do
+        local sq, put = squares[(i - 1) % #squares + 1], false
+        for _ = 1, r.count do
+            local item = sq:AddWorldInventoryItem(r.item, ZombRand(100) / 100, ZombRand(100) / 100, 0)
+            if item then item:getModData().semRunId = run.id; put = true end
+        end
+        local key = sq:getX() .. "," .. sq:getY()
+        if put and not seen[key] then
+            seen[key] = true
+            used[#used + 1] = sq
+            run.data.ground[#run.data.ground + 1] = { x = sq:getX(), y = sq:getY(), z = sq:getZ() }
+        end
+    end
+    return used
+end
+
 local function squareOf(c) return getCell():getGridSquare(c.x, c.y, c.z) end
 
--- true when every crate of the run is empty or gone; a crate on an unloaded square counts as not empty
+-- true when a ground-loot square still holds an item of the run
+local function groundHas(sq, runId)
+    local w = sq:getWorldObjects()
+    for i = 0, w:size() - 1 do
+        local ok, id = pcall(function() return w:get(i):getItem():getModData().semRunId end)
+        if ok and id == runId then return true end
+    end
+    return false
+end
+
+-- true when every crate of the run is empty or gone and its ground loot (Spawn.scatterLoot) is picked up; a crate or loot
+-- square that is not loaded counts as not empty
 function Spawn.cratesEmpty(run)
     for _, c in ipairs(run.data.crates or {}) do
         local sq = squareOf(c)
@@ -227,7 +275,46 @@ function Spawn.cratesEmpty(run)
         local obj = Spawn.findCrate(sq, run.id)
         if obj and not obj:getContainer():isEmpty() then return false end
     end
+    for _, c in ipairs(run.data.ground or {}) do
+        local sq = squareOf(c)
+        if not sq or groundHas(sq, run.id) then return false end
+    end
     return true
+end
+
+-- Vehicle loot: one roll (Spawn.rollItems) shared out over the cars' trunks and gloveboxes (any container part when they
+-- have none), row by row, each item sent to clients. Returns how many containers got loot; 0 when the cars have no container.
+function Spawn.loadVehicles(run, o, cars)
+    local main, other = {}, {}
+    for _, car in ipairs(cars) do
+        pcall(function()
+            for i = 0, car:getPartCount() - 1 do
+                local part = car:getPartByIndex(i)
+                local box = part:getItemContainer()
+                if box then
+                    local id = tostring(part:getId())
+                    local list = (id:find("Truck") or id:find("Trunk") or id == "GloveBox") and main or other
+                    list[#list + 1] = box
+                end
+            end
+        end)
+    end
+    local boxes = #main > 0 and main or other
+    if #boxes == 0 then return 0 end
+    local filled, unsent = {}, 0
+    for i, r in ipairs(Spawn.rollItems(run, o)) do
+        local k = (i - 1) % #boxes + 1
+        local box = boxes[k]
+        filled[k] = true
+        for _ = 1, r.count do
+            local item = box:AddItem(r.item)
+            if item and not pcall(sendAddItemToContainer, box, item) then unsent = unsent + 1 end
+        end
+    end
+    if unsent > 0 then SEM.Runner.warn(run, unsent .. " vehicle loot item(s) not sent to clients; they show after a reload") end
+    local n = 0
+    for _ in pairs(filled) do n = n + 1 end
+    return n
 end
 
 -- Removes the run's crates that are not wanted any more: empty ones (unless cancelled, and only when removeEmpty) and any
@@ -401,17 +488,17 @@ end
 -- calls of 5, each on a random loaded spot in a ring around the square); pct of them become sprinters (server-side doSprinter,
 -- proven in spike S5). outfit (nil = random clothing) is passed to every call. refs, when given, collects { id, z } for each
 -- zombie so the caller can track them; per(ref), when given, is called for each as it spawns. done(spawned, sprinters) is
--- called once the job is over. Cancelling or failing the run (Spawn.cancelDefers) drops the job; zombies already spawned stay.
+-- called once the job is over. unsafe = true spawns on protected ground too (D49: only a takeover). Cancelling or failing the run (Spawn.cancelDefers) drops the job; zombies already spawned stay.
 local jobs = {}
 
-function Spawn.guards(run, square, count, radius, pct, outfit, refs, done, per)
+function Spawn.guards(run, square, count, radius, pct, outfit, refs, done, per, unsafe)
     count = Spawn.clamp(count)
     if count == 0 then
         if done then done(0, 0) end
         return
     end
     jobs[#jobs + 1] = { run = run, x0 = square:getX(), y0 = square:getY(), count = count, radius = radius, pct = pct or 0,
-        outfit = outfit, refs = refs, per = per, done = done, spawned = 0, sprinters = 0, tries = count + 10 }
+        outfit = outfit, refs = refs, per = per, done = done, unsafe = unsafe, spawned = 0, sprinters = 0, tries = count + 10 }
 end
 
 -- one batch of a job; true when the job is over (all spawned, or the attempts ran out)
@@ -421,7 +508,7 @@ local function stepJob(j)
         j.tries = j.tries - 1
         local a, d = math.rad(ZombRand(360)), 3 + ZombRand(math.max(1, j.radius - 2))
         local x, y = math.floor(j.x0 + math.cos(a) * d), math.floor(j.y0 + math.sin(a) * d)
-        if getCell():getGridSquare(x, y, 0) and not Spawn.protected(x, y) then
+        if getCell():getGridSquare(x, y, 0) and (j.unsafe or not Spawn.protected(x, y)) then
             local n = math.min(5, j.count - j.spawned, budget)
             local list = addZombiesInOutfit(x, y, 0, n, j.outfit, 50)
             if list then
@@ -432,7 +519,8 @@ local function stepJob(j)
                     end
                     local ok, id = pcall(function() return z:getOnlineID() end)
                     if ok and id then
-                        Spawn.tag(j.run, z, id, "HostileZombie")
+                        -- a stand-in run (Siege overrun, Takeover) has ended already: its tag would never be untagged
+                        if not j.run.standIn then Spawn.tag(j.run, z, id, "HostileZombie") end
                         local ref = { id = id, z = z }
                         if j.refs then j.refs[#j.refs + 1] = ref end
                         if j.per then j.per(ref) end
@@ -499,6 +587,23 @@ Spawn.nearestPlayer = nearestPlayer
 -- shared out over all, one site after another so a shortfall at one is made up at the next). Zombies spawn across ticks, so
 -- the result comes through done(guards, noun, sprinters): the guard count, a noun for the status line ("Level 2 NPC" or
 -- "zombie") and the sprinter count. done is called at once when there is nothing to wait for.
+-- The weapon pack for an NPC spawn from o.weaponPack, a list of pack names of which one is picked ("random" = any pack with
+-- weapons), or nil for the NPC level's own weapons: an empty list, or a pack deleted since (warned when run is given).
+function Spawn.weaponPack(o, run)
+    local names = type(o) == "table" and o.weaponPack
+    if type(names) ~= "table" or #names == 0 then return nil end
+    local packs = SEM.Store and SEM.Store.config and SEM.Store.config.weaponPacks or {}
+    local name, full = names[ZombRand(#names) + 1], {}
+    for _, p in ipairs(packs) do
+        if #(p.weapons or {}) > 0 and (name == "random" or p.name == name) then full[#full + 1] = p end
+    end
+    if #full == 0 then
+        if run then SEM.Runner.warn(run, "weapon pack " .. tostring(name) .. " not found or empty, the NPCs keep their own weapons") end
+        return nil
+    end
+    return full[ZombRand(#full) + 1]
+end
+
 -- NPC guards fall back to zombies, npcCount * 2 of them, with a warning saying why. NPC guards are saved in run.data like a
 -- camp's group (Camp's hook claims them, which gives them their icons). refs, when given, collects the zombies as Spawn.guards does.
 function Spawn.siteGuards(run, o, sites, done, refs)
@@ -507,7 +612,7 @@ function Spawn.siteGuards(run, o, sites, done, refs)
     if o.guardType == "npc" then
         local sq = sites[1]
         local made, why = SEM.Compat_ALife.spawnGuards(nearestPlayer(sq:getX(), sq:getY()), sq:getX(), sq:getY(), sq:getZ(),
-            o.npcCount, o.npcTier, o.guardLeash, o.guardLeash)
+            o.npcCount, o.npcTier, o.guardLeash, o.guardLeash, o.npcDifficulty, Spawn.weaponPack(o, run))
         if made > 0 then
             run.data.want, run.data.uids, run.data.dead = made, {}, {}
             run.data.claimX, run.data.claimY, run.data.claimUntil = sq:getX(), sq:getY(), SEM.Runner.clock() + C.CAMP_CLAIM

@@ -1,6 +1,6 @@
--- Server Event Manager: Convoy Wreck. Damaged vehicles on a road (road sites preferred), a loot crate beside them and
--- guards (zombies or NPCs, never none). Ends when every guard is dead or the duration is up, not on loot: the crate and the
--- wrecks stay in the world.
+-- Server Event Manager: Convoy Wreck. Damaged vehicles on a road (road sites preferred), their loot in the trunks and
+-- gloveboxes (a crate beside them only when the cars have no container) and guards (zombies or NPCs, never none). Ends
+-- when every guard is dead or the duration is up, not on loot: the loot and the wrecks stay in the world.
 if isClient() then return end
 require "SEM/Config"
 require "SEM/Spawn"
@@ -111,7 +111,7 @@ local function place(run, o)
     if not pack then SEM.Runner.warn(run, "vehicle pack " .. entry .. " no longer exists, using the default cars") end
     local ids, skipped = Convoy.usable(list, known)
     if #skipped > 0 then SEM.Runner.warn(run, "unknown vehicle ids skipped: " .. table.concat(skipped, ", ")) end
-    local squares, used, made, failed = {}, {}, 0, 0
+    local squares, cars, used, made, failed = {}, {}, {}, 0, 0
     for _, id in ipairs(Convoy.pick(ids, o.vehicleCount, ZombRand)) do
         local first = squares[1]
         local sq = vehicleSquare(first and first:getX() or run.x, first and first:getY() or run.y, first and 14 or 12, o, used)
@@ -128,6 +128,7 @@ local function place(run, o)
             wreck(car, o.damage)
             made = made + 1
             squares[#squares + 1] = sq
+            cars[#cars + 1] = car
         else
             failed = failed + 1
         end
@@ -137,22 +138,29 @@ local function place(run, o)
     run.x, run.y, run.z = squares[1]:getX(), squares[1]:getY(), squares[1]:getZ()
     SEM.Runner.crateLanded(run, run.x, run.y) -- the marker follows the wreck, with or without a crate
     run.data.vehicles = made
-    local crates = Spawn.placeCrates(run, o, 1, false)
-    if #crates == 0 then SEM.Runner.warn(run, "no room for the loot crate") end
+    -- the loot is the convoy's cargo, in the cars' trunks and gloveboxes; a crate only when the cars have no container
+    local loaded, loot = Spawn.loadVehicles(run, o, cars), nil
+    if loaded > 0 then
+        loot = "loot in " .. loaded .. " vehicle container(s), "
+    else
+        local crates = Spawn.placeCrates(run, o, 1, false)
+        if #crates == 0 then SEM.Runner.warn(run, "no room for the loot crate") end
+        loot = #crates > 0 and "loot crate, " or "no loot, "
+    end
     run.placed = true
     local st = { refs = {} }
     Convoy.state[run.id] = st
     if o.guardType == "none" then o.guardType = "zombies" end -- saved before D45: guards are no longer optional
     local function report(guards, kind, sprinters)
         st.total, st.tracked = guards, #st.refs
-        SEM.Runner.status(run, "Wreck: " .. made .. " vehicle(s), " .. (#crates > 0 and "loot crate, " or "no crate, ") .. guards
+        SEM.Runner.status(run, "Wreck: " .. made .. " vehicle(s), " .. loot .. guards
             .. (kind ~= "" and " " .. kind or "") .. " guard(s)" .. (sprinters > 0 and ", " .. sprinters .. " sprinters" or ""))
     end
     local done = false
     run.data.placing = true
-    Spawn.siteGuards(run, o, #crates > 0 and crates or { squares[1] }, function(...) done = true; run.data.placing = nil; report(...) end, st.refs)
+    Spawn.siteGuards(run, o, squares, function(...) done = true; run.data.placing = nil; report(...) end, st.refs)
     if not done then
-        SEM.Runner.status(run, "Wreck: " .. made .. " vehicle(s), " .. (#crates > 0 and "loot crate, " or "no crate, ") .. "spawning guards")
+        SEM.Runner.status(run, "Wreck: " .. made .. " vehicle(s), " .. loot .. "spawning guards")
     end
 end
 

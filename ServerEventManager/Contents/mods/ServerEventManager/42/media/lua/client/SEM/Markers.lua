@@ -31,14 +31,18 @@ local function draw(m, surface, api)
     if old then pcall(function() old.api:removeMarker(old.handle) end) end
     m.on[surface] = nil
     if not shown(m) then return end -- checked each time a map opens
+    -- D53: with a charged radio, an exact-with-radio marker shows its true spot as a small marker instead of the circle
+    local v = m
+    if m.exactX and SEM.Alerts.hasRadio(getPlayer()) then v = { x = m.exactX, y = m.exactY, radius = 5, exact = true } end
+    m.view = v
     local r, g, b, a = 1.0, 0.55, 0.1, 0.55
-    if m.exact then r, g, b, a = 1.0, 0.15, 0.1, 0.9 end
+    if v.exact then r, g, b, a = 1.0, 0.15, 0.1, 0.9 end
     if m.dot then r, g, b, a = 0.6, 0.6, 0.6, 1 end
-    local handle = api:addGridSquareMarker(m.x, m.y, m.dot and 1 or m.radius, r, g, b, a)
+    local handle = api:addGridSquareMarker(v.x, v.y, m.dot and 1 or v.radius, r, g, b, a)
     m.on[surface] = { handle = handle, api = api }
     if m.dot then
         pcall(function() handle:setMinScreenRadius(4) end)
-    elseif m.exact then -- both exist on WorldMapGridSquareMarkerV1; keeps a 5 tile marker visible when zoomed out
+    elseif v.exact then -- both exist on WorldMapGridSquareMarkerV1; keeps a 5 tile marker visible when zoomed out
         pcall(function() handle:setMinScreenRadius(MIN_PX) end)
         pcall(function() handle:setBlink(true) end)
     end
@@ -83,8 +87,9 @@ function Markers.hover(ui, api)
     local mx, my, best, bestR = ui:getMouseX(), ui:getMouseY(), nil, nil
     for _, m in pairs(list) do
         if not SEM.empty(m.on) then
-            local cx, cy = api:worldToUIX(m.x, m.y), api:worldToUIY(m.x, m.y)
-            local ex, ey = api:worldToUIX(m.x + m.radius, m.y), api:worldToUIY(m.x + m.radius, m.y)
+            local v = m.view or m
+            local cx, cy = api:worldToUIX(v.x, v.y), api:worldToUIY(v.x, v.y)
+            local ex, ey = api:worldToUIX(v.x + v.radius, v.y), api:worldToUIY(v.x + v.radius, v.y)
             local r = math.max(MIN_PX, math.sqrt((ex - cx) ^ 2 + (ey - cy) ^ 2))
             if (mx - cx) ^ 2 + (my - cy) ^ 2 <= r * r and (not bestR or r < bestR) then best, bestR = m, r end
         end
@@ -93,7 +98,7 @@ function Markers.hover(ui, api)
     local lines = { best.event or best.title or "Server event" }
     if best.title and best.title ~= lines[1] then lines[#lines + 1] = best.title end
     if best.text and best.text ~= "" then lines[#lines + 1] = best.text end
-    lines[#lines + 1] = best.exact and "Exact location" or "Somewhere in this circle"
+    lines[#lines + 1] = (best.view or best).exact and "Exact location" or "Somewhere in this circle"
     local w, lh = 0, T.fh()
     for _, l in ipairs(lines) do w = math.max(w, T.tw(l)) end
     w = w + 16
@@ -139,7 +144,7 @@ Events.OnTick.Add(function()
 end)
 
 local function add(a)
-    list[a.id] = { x = a.x, y = a.y, radius = a.radius or 50, exact = a.exact, radio = a.radio, title = a.title, event = a.event, text = a.text, on = {} }
+    list[a.id] = { x = a.x, y = a.y, radius = a.radius or 50, exact = a.exact, radio = a.radio, exactX = a.exactX, exactY = a.exactY, title = a.title, event = a.event, text = a.text, on = {} }
 end
 
 local on = {}

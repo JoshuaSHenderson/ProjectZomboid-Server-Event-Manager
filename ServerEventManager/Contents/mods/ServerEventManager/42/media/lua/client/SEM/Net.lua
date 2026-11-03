@@ -42,6 +42,16 @@ function Net.clock()
     return ok and cal or { dow = 1, hour = 0, minute = 0 }, false
 end
 
+-- D52: the server's and this client's offsets from UTC in minutes, or nothing when either is unknown or they are the same
+function Net.offsets()
+    local server = Net.snapshot and Net.snapshot.serverOffsetMin
+    local ok, mine = pcall(function()
+        local k = Calendar.getInstance()
+        return (k:get(Calendar.ZONE_OFFSET) + k:get(Calendar.DST_OFFSET)) / 60000
+    end)
+    if type(server) == "number" and ok and mine ~= server then return server, mine end
+end
+
 local function console(fn, ...)
     local C = SEM.Console
     if C and C[fn] then
@@ -59,17 +69,6 @@ function on.snapshot(args)
     console("onSnapshot", args.ack)
 end
 
-function on.error(args)
-    args = type(args) == "table" and args or {}
-    local errs = type(args.errors) == "table" and args.errors or {}
-    local n = 0
-    for k, m in pairs(errs) do
-        n = n + 1
-        if n <= 3 then Net.line(tostring(args.command) .. ": " .. tostring(k) .. " " .. tostring(m), true) end
-    end
-    console("onError", args.command, errs, args.ack)
-end
-
 local function cfgWin(fn, ...)
     local C = SEM.ConfigPage
     if C and C[fn] then
@@ -78,7 +77,22 @@ local function cfgWin(fn, ...)
     end
 end
 
-function on.configExport(args) cfgWin("onExport", type(args) == "table" and args.text or nil) end
+function on.error(args)
+    args = type(args) == "table" and args or {}
+    local errs = type(args.errors) == "table" and args.errors or {}
+    local n, first = 0
+    for k, m in pairs(errs) do
+        n = n + 1
+        first = first or tostring(k) .. " " .. tostring(m)
+        if n <= 3 then Net.line(tostring(args.command) .. ": " .. tostring(k) .. " " .. tostring(m), true) end
+    end
+    if args.command == "getConfig" or args.command == "importConfigPart" then cfgWin("onError", first) end -- the page waits on its own replies
+    console("onError", args.command, errs, args.ack)
+end
+
+function on.configExportPart(args)
+    if type(args) == "table" then cfgWin("onPart", args.i, args.n, args.text) end
+end
 function on.configError(args) cfgWin("onError", type(args) == "table" and args.text or nil) end
 
 function on.notice(args)

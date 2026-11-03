@@ -1,7 +1,7 @@
 -- Server Event Manager: the table picker, used wherever an asset is chosen. Search, category filter, list on the left, what is
 -- chosen on the right. Open with SEM.LootPicker.open(title, value, onApply, kind, filter). Kinds (KINDS below):
 -- loot (default, D28): value and result are rows { item, chance, min, max }; vehicle: a list of ids;
--- outfit, player, base: one id; pack, lootPack: a list of up to 10 pack names. filter narrows the base kind to one of safehouse, jeem, home.
+-- weapon: a list of weapon ids; outfit, player, base: one id; pack, lootPack, weaponPack: a list of up to 10 pack names. filter narrows the base kind to one of safehouse, jeem, home.
 if isServer() then return end
 require "ISUI/ISPanel"
 require "ISUI/ISButton"
@@ -109,6 +109,24 @@ local function packsOf(field, tiers)
     end
 end
 
+-- every weapon item script, modded ones included: Firearm or Melee, so a pack can be filtered to guns
+local function weapons()
+    return guarded("weapon", function()
+        local all, out = getScriptManager():getAllItems(), {}
+        for i = 0, all:size() - 1 do
+            local it = all:get(i)
+            local ok, weapon = pcall(function() return it:isItemType(ItemType.WEAPON) end)
+            if ok and weapon and not it:getObsolete() and not it:isHidden() then
+                local name = it:getDisplayName()
+                local okR, ranged = pcall(function() return it:isRanged() end)
+                if not okR then ranged = it:getDisplayCategory() == "Firearm" end
+                out[#out + 1] = { id = it:getFullName(), name = (name and name ~= "") and name or it:getFullName(), category = ranged and "Firearm" or "Melee" }
+            end
+        end
+        return out
+    end)
+end
+
 -- item scripts, built once on first use. list: pickable items sorted by name; names: id -> display name
 -- for every script, so rows chosen earlier still read well. Obsolete and hidden items are skipped, as
 -- vanilla ISItemsListViewer does.
@@ -152,6 +170,8 @@ local KINDS = {
     base = { catalog = bases, head = "Pick Base", noun = "bases", single = true },
     pack = { catalog = packsOf("vehiclePacks"), head = "Pick Vehicle Packs", noun = "packs", max = 10 },
     lootPack = { catalog = packsOf("lootPacks", true), head = "Pick Loot Packs", noun = "packs", max = 10 },
+    weapon = { catalog = weapons, head = "Edit Weapons", noun = "weapons", max = 50 },
+    weaponPack = { catalog = packsOf("weaponPacks"), head = "Pick Weapon Packs", noun = "packs", max = 10 },
 }
 
 function P:new(title, value, onDone, kind, filter)

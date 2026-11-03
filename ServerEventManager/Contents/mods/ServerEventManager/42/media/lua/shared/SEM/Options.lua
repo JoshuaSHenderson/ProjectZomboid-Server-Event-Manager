@@ -38,6 +38,7 @@ local function range(f, v)
 end
 
 local check = {}
+Options.check = check -- the option types, for SEM.registerEvent
 
 function check.bool(f, v)
     if type(v) ~= "boolean" then return nil, "must be true or false" end
@@ -103,6 +104,13 @@ function check.vehicleList(f, v)
     return out
 end
 
+-- a weapon pack's item ids, like a vehicle list
+function check.weaponList(f, v)
+    local out, err = check.vehicleList(f, v)
+    if not out then return nil, (tostring(err):gsub("vehicle", "weapon")) end
+    return out
+end
+
 -- a list of pack names (D40); duplicates are dropped
 function check.packList(f, v)
     local ok, err = isList(v, 10)
@@ -113,6 +121,11 @@ function check.packList(f, v)
         if not seen[e] then seen[e] = true; out[#out + 1] = e end
     end
     return out
+end
+
+-- D50: n plus pct percent of n for each player beyond the first, rounded down; never below n
+function SEM.scaleCount(n, pct, players)
+    return n + math.max(0, math.floor(n * pct / 100 * (players - 1)))
 end
 
 function Options.defaults(schema)

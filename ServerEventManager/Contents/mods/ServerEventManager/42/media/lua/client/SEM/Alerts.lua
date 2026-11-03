@@ -96,6 +96,14 @@ function Alerts.flyover(args)
     Alerts.flyovers[args.id] = { snd = p:playSoundLocal(SOUND), em = p:getEmitter(), born = getTimestampMs() }
 end
 
+-- Aircraft Crash going active: one loud explosion for every player (radio rule as the flyover). Josh's sound, from
+-- docs/sounds (converted to ogg; scripts/ServerEventManager/sounds_sem.txt)
+function Alerts.boom(args)
+    local p = getPlayer()
+    if not p or (args.radio and not Alerts.hasRadio(p)) then return end
+    getSoundManager():playUISound("SEM_CrashBoom")
+end
+
 function Alerts.show(args)
     if args.radio and not Alerts.hasRadio(getPlayer()) then return end
     waiting[#waiting + 1] = args
@@ -141,7 +149,8 @@ end)
 
 Events.OnServerCommand.Add(function(module, command, args)
     if module ~= SEM.Config.MODULE or type(args) ~= "table" then return end
-    local fn = command == "alert" and Alerts.show or command == "flyover" and Alerts.flyover or command == "alertCancel" and Alerts.cancel
+    local fn = command == "alert" and Alerts.show or command == "flyover" and Alerts.flyover or command == "boom" and Alerts.boom
+        or command == "alertCancel" and Alerts.cancel
     if not fn then return end
     local ok, err = pcall(fn, command == "alertCancel" and args.id or args)
     if not ok then print("[SEM] alert: " .. tostring(err)) end

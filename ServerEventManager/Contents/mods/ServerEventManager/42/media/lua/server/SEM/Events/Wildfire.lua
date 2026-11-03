@@ -192,7 +192,8 @@ function Wildfire.guardAll()
     lastGuard = now
     if not SEM.Store.world then return end
     for _, run in pairs(SEM.Store.world.runs) do
-        local seeds = type(run) == "table" and run.eventId == "wildfire" and type(run.data) == "table" and run.data.seeds
+        -- any live run with fire seeds (Wildfire, Aircraft Crash), not only wildfires
+        local seeds = type(run) == "table" and type(run.data) == "table" and run.data.seeds
         if seeds and #seeds > 0 and not findJob("guard:" .. run.id) then
             local size = chunkSize()
             local blocks = Wildfire.touching(Wildfire.blocks(seeds, C.FIRE_RADIUS + C.FIRE_EDGE, size), SEM.Safety.zones(), size)
@@ -316,14 +317,17 @@ function Wildfire.start(run)
     Spawn.defer(run, run.x, run.y, function() place(run) end)
 end
 
--- Fire found by a scan: protected ground and the outer band of FIRE_RADIUS are put out (so a blaze cannot walk past what the
--- scan and the sweeps can see), then the outermost fire past maxBurnSquares.
-local function applyScan(run, list)
-    local seeds, o = run.data and run.data.seeds, run.options
+-- Fire found by a scan: protected ground, the run's crate squares and the outer band of FIRE_RADIUS are put out (so a blaze
+-- cannot walk past what the scan and the sweeps can see), then the outermost fire past cap. quiet leaves the status alone.
+local function applyScan(run, list, cap, quiet)
+    local seeds = run.data and run.data.seeds
     if not seeds or #seeds == 0 then return end
+    local crate = {}
+    for _, c in ipairs(run.data.crates or {}) do crate[c.x .. "," .. c.y] = true end
+    for _, c in ipairs(run.data.ground or {}) do crate[c.x .. "," .. c.y] = true end -- ground loot (Spawn.scatterLoot)
     local kept, out = {}, 0
     for _, e in ipairs(list) do
-        if Spawn.protected(e.x, e.y) or not Wildfire.near(seeds, e.x, e.y, C.FIRE_RADIUS - C.FIRE_EDGE) then
+        if Spawn.protected(e.x, e.y) or crate[e.x .. "," .. e.y] or not Wildfire.near(seeds, e.x, e.y, C.FIRE_RADIUS - C.FIRE_EDGE) then
             put(e.sq)
             out = out + 1
         else
@@ -331,25 +335,31 @@ local function applyScan(run, list)
         end
     end
     local cx, cy = centroid(seeds)
-    for _, e in ipairs(Wildfire.overCap(kept, o.maxBurnSquares, cx, cy)) do put(e.sq) out = out + 1 end
-    run.data.burning = #kept - math.max(0, #kept - o.maxBurnSquares)
+    for _, e in ipairs(Wildfire.overCap(kept, cap, cx, cy)) do put(e.sq) out = out + 1 end
+    run.data.burning = #kept - math.max(0, #kept - cap)
+    if quiet then return end
     SEM.Runner.status(run, "Burning: " .. run.data.burning .. " squares" .. (out > 0 and (", " .. out .. " put out") or ""))
 end
 
--- every minute: starts a scan when FIRE_SCAN seconds have passed and none is running (Wildfire.slice walks it and applies
--- the result); ends at burnMinutes
-function Wildfire.update(run)
-    if not run.placed then return false end
-    local o, now = run.options, SEM.Runner.clock()
-    if run.elapsed - (run.data.burnFrom or 0) >= o.burnMinutes * 60 then return "burn time over" end
-    if not run.data.seeds or findJob("run:" .. run.id) then return false end
-    if now - (run.data.lastScan or 0) < C.FIRE_SCAN then return false end
+-- Starts a containment scan of the run's fire when FIRE_SCAN seconds have passed and none is running; Wildfire.slice walks
+-- it and applyScan keeps the blaze under cap. Shared with Aircraft Crash. Nothing to do once the seeds are gone.
+function Wildfire.contain(run, cap, quiet)
+    local now = SEM.Runner.clock()
+    if not run.data.seeds or findJob("run:" .. run.id) then return end
+    if now - (run.data.lastScan or 0) < C.FIRE_SCAN then return end
     run.data.lastScan = now
     local found = {}
     local sc = newScan(Wildfire.blocks(run.data.seeds, C.FIRE_RADIUS, chunkSize()), function(sq, x, y, z)
         if burning(sq) then found[#found + 1] = { x = x, y = y, z = z, sq = sq } end
     end)
-    addJob("run:" .. run.id, sc, function() applyScan(run, found) end)
+    addJob("run:" .. run.id, sc, function() applyScan(run, found, cap, quiet) end)
+end
+
+-- every minute: containment (Wildfire.contain); ends at burnMinutes
+function Wildfire.update(run)
+    if not run.placed then return false end
+    if run.elapsed - (run.data.burnFrom or 0) >= run.options.burnMinutes * 60 then return "burn time over" end
+    Wildfire.contain(run, run.options.maxBurnSquares)
     return false
 end
 

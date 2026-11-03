@@ -42,6 +42,19 @@ function P.nameError(sel, name)
     return nil
 end
 
+-- "<base> Copy", then "<base> Copy 2" and up while a preset has that name; the base is cut so the name fits 40 characters
+function P.copyName(base)
+    local taken = {}
+    for k in pairs(((SEM.Net.snapshot or {}).config or {}).presets or {}) do taken[tostring(k):lower()] = true end
+    local n = 1
+    while true do
+        local tail = n == 1 and " Copy" or " Copy " .. n
+        local name = trim(trim(base):sub(1, 40 - #tail)) .. tail
+        if not taken[name:lower()] then return name end
+        n = n + 1
+    end
+end
+
 local HELP = "Default is this event's own settings. Pick a preset to edit it, or New preset to start from Default. Update keeps your changes (and a new name); Save As keeps them under the name typed."
 
 local NAME_HELP = "The preset's name, 1 to 40 characters. Changing it and pressing Update renames the preset."

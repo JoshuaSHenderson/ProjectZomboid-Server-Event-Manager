@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.3.0-beta
+
+Built from the second live-server list and played on the test server with A-Life and Jeem.
+
+### Added
+
+- New event Aircraft Crash: a burning helicopter or plane wreck (real 3D models) on a clear field, scorched ground, fires that
+  are put out after Burn Minutes, loot scattered on the ground and optional guards. A loud explosion plays for every player as it goes active (Sound On; Require Radio applies).
+  The ground round the wreck is burnt black, thickest near the wreck with a ragged edge.
+  It lands only where grass or dirt is clear of trees, buildings, roads and water, and moves to a new site when none is near.
+- Show Notifications (every event): off runs the event without on-screen notices; marker and Server Events bar unchanged.
+- Scheduler mode Once, After Game Hours: fires one time after 1 to 72 game hours, then turns the entry off. For testing a schedule.
+- Under Siege shows its base on the map during the warning (Lead Minutes), so players can check whose base it is.
+- Weapon Packs page: named sets of weapons (modded ones included) with an ammo count. Pick one or more on any event with
+  hostile NPCs (guards, Hostile Camp, Under Siege waves and takeovers, Hunted) and every NPC spawns with one gun and one
+  melee weapon from the pack. Starts with Handguns, Shotguns, Hunters, Military and Melee Only.
+- Modder framework: `SEM.registerEvent` lets another mod add its own event with options, presets, scheduling, queueing and
+  logs. See MODDING.md.
+- Under Siege: Return Minutes. Nobody back at the base in time, the siege fails and the base is taken over: enemies occupy
+  it, Loot Lost Percent of its loot is gone and Takeover Fires burn. Applied when a player next loads the base. On by default.
+- Under Siege: Wave Type NPC, Zombies or Random, with Zombie Attackers per wave. Zombie waves need no A-Life.
+- Extra Per Player (Percent): events with a count add more for each online player beyond the first. Limits still apply.
+- Random guards have their own minimum and maximum for zombies and for NPCs.
+- NPC Difficulty (Easy, Normal, Hard, Brutal): NPC health, damage dealt and damage taken.
+- Exact With Radio: players carrying a charged radio see the exact spot instead of the search circle.
+- Your local time beside the server time on the clock, the Scheduler's Next column and window times.
+- Copy: duplicate a preset and save it under a new name.
+- Home page at the top of the menu with the update notes, and a guided walkthrough for first-time setup.
+- Click sounds on the console's own buttons and menu.
+
+### Changed
+
+- Migrating Horde targets: Location, Random, Random Town, Random Countryside, Random Player. Old base targets become Random
+  Player.
+- Seconds, not minutes, between Siege waves.
+- Location fields show only when they apply; Minimum Character Age in Days only for Random Player.
+- Import / Export is its own page, and sends the config in parts so large configs fit.
+- A removed mod's events keep their options, presets and schedules, hidden, until the mod is back.
+- Aircraft Crash's Location Mode defaults to Countryside: towns rarely have a clear field.
+- Loot goes where the event puts it: Convoy Wreck's is in the vehicles' trunks and gloveboxes (a crate only when they
+  have no container); Aircraft Crash's is scattered on the ground around the wreck and the event ends when it is all
+  picked up. Airdrop and Camp keep their crates.
+
+### Fixed
+
+- Import / Export stuck on loading.
+- A hover error on tick boxes.
+
 ## 0.2.0-beta
 
 ### Fixed
