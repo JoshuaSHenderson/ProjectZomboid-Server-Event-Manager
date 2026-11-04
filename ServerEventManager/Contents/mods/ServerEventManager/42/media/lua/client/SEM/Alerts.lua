@@ -93,7 +93,9 @@ function Alerts.flyover(args)
     if args.id == nil or not p then return end
     if args.radio and not Alerts.hasRadio(p) then return end
     -- keep the emitter that played it; stopping later must not depend on getPlayer() still being the same
-    Alerts.flyovers[args.id] = { snd = p:playSoundLocal(SOUND), em = p:getEmitter(), born = getTimestampMs() }
+    local em, snd = p:getEmitter(), p:playSoundLocal(SOUND)
+    pcall(function() em:setVolume(snd, args.volume or 0.3) end) -- unverified on B42: if the helicopter stays loud, see G5-handoff fallback
+    Alerts.flyovers[args.id] = { snd = snd, em = em, born = getTimestampMs() }
 end
 
 -- Aircraft Crash going active: one loud explosion for every player (radio rule as the flyover). "Loud Explosion" by

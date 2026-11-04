@@ -12,7 +12,8 @@ local function place(run, o)
     local sites = Spawn.placeCrates(run, o, o.crateCount, o.smoke)
     if #sites == 0 then return SEM.Runner.fail(run, "no valid ground near the target") end
     run.placed = true
-    if o.soundOn and o.flyoverSound then SEM.Runner.toAll("flyover", { id = run.id, radio = o.requireRadio }) end
+    local vol = o.flyoverVolume or 30 -- old saves load the default; the fallback covers bare option tables
+    if o.soundOn and o.flyoverSound and vol > 0 then SEM.Runner.toAll("flyover", { id = run.id, radio = o.requireRadio, volume = vol / 100 }) end
     -- zombie guards spawn across ticks; the status gives the final count once they are all out
     local done = false
     run.data.placing = true

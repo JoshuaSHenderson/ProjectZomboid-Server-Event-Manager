@@ -142,25 +142,44 @@ function Fmt.entryText(e, titles)
     return title .. " " .. s .. (why and (" - " .. tostring(why)) or "")
 end
 
--- Pure. The Logs pane as plain text for Export Logs: a header, the server history newest first (each with its UTC time and site
--- when it has them) and this session's notices. history = snapshot.history, lines = Net.lines (newest first), stamp(at) gives
--- the time text, header = first line.
-function Fmt.logExport(history, lines, titles, stamp, header)
-    local out = { header, "", "Event history (newest first, the server keeps the last 50):" }
-    local n = 0
-    for i = #(history or {}), 1, -1 do
-        local e = history[i]
-        if type(e) == "table" then
-            n = n + 1
-            local site = e.x and (" @ " .. math.floor(e.x) .. "," .. math.floor(e.y)) or ""
-            out[#out + 1] = (e.at and (stamp(e.at) .. "  ") or "") .. Fmt.entryText(e, titles) .. site
+-- Logs pane lines (Runner.log entries { n, at, text, bad, run, title }, plus client-only notices without n).
+-- Pure. Puts e into list (oldest first) by time, after any entry with the same time so arrival order holds; an entry with a number
+-- already in the list is dropped. Keeps the newest max entries. Returns true when e was added.
+function Fmt.logInsert(list, e, max)
+    if e.n then
+        for i = #list, math.max(1, #list - 50), -1 do -- a duplicate is always among the newest
+            if list[i].n == e.n then return false end
         end
     end
-    if n == 0 then out[#out + 1] = "(none)" end
-    out[#out + 1] = ""
-    out[#out + 1] = "Console notices this session (newest first):"
-    for _, l in ipairs(lines or {}) do out[#out + 1] = (l.bad and "! " or "  ") .. tostring(l.text) end
-    if #(lines or {}) == 0 then out[#out + 1] = "(none)" end
+    local i = #list
+    while i > 0 and list[i].at > e.at do i = i - 1 end
+    table.insert(list, i + 1, e)
+    while #list > max do table.remove(list, 1) end
+    return true
+end
+
+-- Pure. "11-04 14:03:22" in the server's zone, then "(yours 09:03:22)" when this client's zone differs; offsets are minutes from UTC
+function Fmt.logStamp(at, serverOffset, clientOffset)
+    local s = os.date("!%m-%d %H:%M:%S", at + (serverOffset or 0) * 60)
+    if serverOffset and clientOffset and serverOffset ~= clientOffset then
+        s = s .. " (yours " .. os.date("!%m-%d %H:%M:%S", at + clientOffset * 60) .. ")"
+    end
+    return s
+end
+
+function Fmt.logLine(e, serverOffset, clientOffset)
+    local who = e.title and ("#" .. tostring(e.run) .. " " .. e.title .. ": ") or ""
+    return Fmt.logStamp(e.at, serverOffset, clientOffset) .. "  " .. who .. e.text
+end
+
+-- Pure. The Logs pane as plain text for Export Logs: a header, then every entry newest first, each with its time.
+function Fmt.logExport(log, serverOffset, clientOffset, header)
+    local out = { header, "", "Log, newest first (times are the server's" .. ((serverOffset and clientOffset and serverOffset ~= clientOffset) and ", yours in brackets" or "") .. "):" }
+    for i = #(log or {}), 1, -1 do
+        local e = log[i]
+        out[#out + 1] = (e.bad and "! " or "  ") .. Fmt.logLine(e, serverOffset, clientOffset)
+    end
+    if #out == 3 then out[#out + 1] = "(none)" end
     return table.concat(out, "\n") .. "\n"
 end
 
@@ -199,6 +218,24 @@ function Fmt.splitKey(k)
     local scope, rest = tostring(k):match("^(%a+)%.(.+)$")
     if scope == "options" or scope == "schedule" or scope == "conditions" then return scope, rest end
     return "other", tostring(k)
+end
+
+-- The default-setup notice: when it was made and which events, from a config (or snapshot config) holding defaultSetup.
+-- Names are the entries that still exist. Review text points to the pages.
+function Fmt.defaultSetupNames(config)
+    local names = {}
+    for _, id in ipairs(config.defaultSetup.ids) do
+        local e = config.schedules[id]
+        if e then names[#names + 1] = e.name:gsub("^Default: ", "") end
+    end
+    return names
+end
+
+function Fmt.defaultSetupText(config, short)
+    local ds = config.defaultSetup
+    local names = Fmt.defaultSetupNames(config)
+    return "A default setup was created on " .. os.date("!%Y-%m-%d", ds.at / 1000) .. ": " .. #names .. " scheduled events (" .. table.concat(names, ", ") .. "). "
+        .. "Review and change them in Scheduler and Options." .. (short and " Open the Home page and press Got it to dismiss this." or "")
 end
 
 return Fmt

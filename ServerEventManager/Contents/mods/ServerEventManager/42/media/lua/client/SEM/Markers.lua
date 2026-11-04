@@ -11,7 +11,7 @@ local T = SEM.Theme
 local Markers = {}
 SEM.Markers = Markers
 
-local MIN_PX, POLL_MS = 12, 2000 -- on-screen pixels, exact markers only; how often the minimap is checked
+local POLL_MS = 2000 -- how often the minimap is checked
 local list = {} -- id -> { x, y, radius, exact, radio, title, event, text, on = { surface -> { handle, api } } }
 local dots = {} -- id -> { x, y, dot = true, on }: admins only, the true site as a small grey dot; no hover box
 local lastPoll = 0
@@ -37,13 +37,15 @@ local function draw(m, surface, api)
     m.view = v
     local r, g, b, a = 1.0, 0.55, 0.1, 0.55
     if v.exact then r, g, b, a = 1.0, 0.15, 0.1, 0.9 end
+    local c = m.color -- D9: per event kind, from the server
+    if type(c) == "table" and type(c[1]) == "number" and type(c[2]) == "number" and type(c[3]) == "number" then r, g, b = c[1], c[2], c[3] end
     if m.dot then r, g, b, a = 0.6, 0.6, 0.6, 1 end
     local handle = api:addGridSquareMarker(v.x, v.y, m.dot and 1 or v.radius, r, g, b, a)
     m.on[surface] = { handle = handle, api = api }
-    if m.dot then
+    -- D8: no setMinScreenRadius, so every circle shows its set radius at any zoom
+    if m.dot then -- the admin dot stays a visible speck
         pcall(function() handle:setMinScreenRadius(4) end)
-    elseif v.exact then -- both exist on WorldMapGridSquareMarkerV1; keeps a 5 tile marker visible when zoomed out
-        pcall(function() handle:setMinScreenRadius(MIN_PX) end)
+    elseif v.exact then
         pcall(function() handle:setBlink(true) end)
     end
 end
@@ -90,7 +92,7 @@ function Markers.hover(ui, api)
             local v = m.view or m
             local cx, cy = api:worldToUIX(v.x, v.y), api:worldToUIY(v.x, v.y)
             local ex, ey = api:worldToUIX(v.x + v.radius, v.y), api:worldToUIY(v.x + v.radius, v.y)
-            local r = math.max(MIN_PX, math.sqrt((ex - cx) ^ 2 + (ey - cy) ^ 2))
+            local r = math.sqrt((ex - cx) ^ 2 + (ey - cy) ^ 2)
             if (mx - cx) ^ 2 + (my - cy) ^ 2 <= r * r and (not bestR or r < bestR) then best, bestR = m, r end
         end
     end
@@ -144,7 +146,7 @@ Events.OnTick.Add(function()
 end)
 
 local function add(a)
-    list[a.id] = { x = a.x, y = a.y, radius = a.radius or 50, exact = a.exact, radio = a.radio, exactX = a.exactX, exactY = a.exactY, title = a.title, event = a.event, text = a.text, on = {} }
+    list[a.id] = { x = a.x, y = a.y, radius = a.radius or 50, exact = a.exact, radio = a.radio, exactX = a.exactX, exactY = a.exactY, title = a.title, event = a.event, text = a.text, color = type(a.color) == "table" and a.color or nil, on = {} }
 end
 
 local on = {}

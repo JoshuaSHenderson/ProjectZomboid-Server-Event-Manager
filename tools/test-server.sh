@@ -20,6 +20,8 @@ WS="/d/SteamLibrary/steamapps/workshop/content/108600"
 EXTRA=""
 [ "${SEM_VIEWPOINT:-1}" != 0 ] && EXTRA="$EXTRA 3619862853/mods/ZombieBuddy 3809306528/mods/Viewpoint"
 [ "${SEM_ALIFE:-1}" != 0 ] && EXTRA="$EXTRA 3803984183/mods/ProjectALifeNPCs 3806944055/mods/ProjectALifeJimmy"
+# A-Life Stance Dots + its Viewpoint bridge: the pattern SEM's first-person marks follow (bug round 2, #7)
+[ "${SEM_ALIFE:-1}" != 0 ] && [ "${SEM_VIEWPOINT:-1}" != 0 ] && EXTRA="$EXTRA 3806786035/mods/ALifeStanceDots 3806786035/mods/ALifeStanceDotsViewpoint"
 for m in $EXTRA; do
   [ -d "$WS/$m" ] || { echo "missing Workshop mod $WS/$m: subscribe in Steam, or turn it off (SEM_ALIFE=0 / SEM_VIEWPOINT=0)" >&2; exit 1; }
   rm -rf "$CACHE/mods/$(basename "$m")"

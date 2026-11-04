@@ -40,8 +40,7 @@ local function arrive(run, o)
     Spawn.guards(run, sq, o.zombies, C.STRANGER_RING, o.sprinterPct, nil, st.refs, function(spawned)
         d.placing = nil
         st.tracked = spawned
-        if spawned == 0 then return SEM.Runner.fail(run, "no loaded ground for the zombies") end
-        run.placed = true
+        run.placed = true -- none spawned is a success without a reward: update finds nothing left
         if (o.protectSeconds or 0) > 0 then
             d.protectUntil = SEM.Runner.clock() + o.protectSeconds
             guard(d)
@@ -93,7 +92,10 @@ function Stranger.update(run)
         Stranger.state[run.id] = st
     end
     local left = Spawn.survey(st.refs)
-    if left == 0 then return reward(run, o) end
+    if left == 0 then
+        if (st.tracked or 0) == 0 then return "no zombies came, no reward" end
+        return reward(run, o)
+    end
     pcall(function() getWorldSoundManager():addSound(nil, run.x, run.y, 0, C.STRANGER_NEAR, C.STRANGER_NEAR) end) -- keeps the wave on them
     local safe = d.protectUntil and ", protected " .. math.ceil(d.protectUntil - SEM.Runner.clock()) .. "s" or ""
     SEM.Runner.status(run, left .. " of " .. st.tracked .. " zombies left, stranger alive" .. safe)

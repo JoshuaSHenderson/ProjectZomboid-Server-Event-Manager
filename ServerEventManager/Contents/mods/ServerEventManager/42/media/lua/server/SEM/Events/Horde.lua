@@ -172,6 +172,7 @@ function Horde.spawnBatch(run, st)
         if st.fails >= 20 then
             SEM.Runner.warn(run, "no room to spawn the rest; " .. st.spawned .. " of " .. st.want .. " spawned")
             st.left = 0
+            run.data.spawnLeft = 0
         end
         return
     end
@@ -179,6 +180,7 @@ function Horde.spawnBatch(run, st)
     local n = math.min(C.HORDE_BATCH, st.left)
     local list = addZombiesInOutfit(sq:getX(), sq:getY(), 0, n, nil, 50)
     st.left = st.left - n
+    run.data.spawnLeft = st.left -- what a restart still spawns (spawned only counts the ones that got an id)
     if not list then return end
     for i = 0, list:size() - 1 do
         local ok, id = pcall(function() return list:get(i):getOnlineID() end)
@@ -250,6 +252,7 @@ function Horde.start(run)
     run.x, run.y, run.z = sq:getX(), sq:getY(), 0
     run.data = { target = t, want = want, spawned = 0 }
     Horde.state[run.id] = Horde.newState(run.x, run.y, want, o.pulseInterval)
+    run.data.spawnLeft = want
     run.placed = true
     if late then SEM.Runner.markerLate(run) end
     if warn then SEM.Runner.warn(run, warn) end
@@ -261,10 +264,15 @@ function Horde.update(run)
     local st = Horde.state[run.id]
     if not st then
         local refs, total = Spawn.ledgerRefs(run)
-        if not refs then return "released by a restart; the zombies stay in the world" end
+        local d = run.data
+        -- no ledger yet is fine while zombies are still to spawn (restart before the first batch)
+        local spawned = d.spawned or total or 0
+        local left = type(d.spawnLeft) == "number" and d.spawnLeft or math.max(0, (d.want or spawned) - spawned)
+        if not refs and not (d.want and left > 0) then return "released by a restart; the zombies stay in the world" end
         st = Horde.newState(run.x, run.y, 0, run.options.pulseInterval) -- a restart lost the list: rebuilt from the ledger
-        st.refs, st.spawned = refs, run.data.spawned or total
-        st.want = run.data.want or st.spawned
+        st.refs, st.spawned = refs or {}, spawned
+        st.want = d.want or st.spawned
+        st.left = left -- the rest still spawns
         Horde.state[run.id] = st
     end
     local n = Horde.survey(st)

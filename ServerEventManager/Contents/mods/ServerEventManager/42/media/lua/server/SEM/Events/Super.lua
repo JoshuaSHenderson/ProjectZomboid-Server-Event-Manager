@@ -86,11 +86,14 @@ local function place(run, o)
     local function finish()
         run.data.placing = nil
         st.spawned = #st.refs
-        if st.spawned == 0 then return SEM.Runner.fail(run, "no loaded ground for the zombies") end
+        if st.spawned == 0 then -- success, not failure: update finds none alive and ends it
+            run.placed = true
+            return SEM.Runner.status(run, "no zombies could spawn")
+        end
         if badHp > 0 then SEM.Runner.warn(run, "health could not be set on " .. badHp .. " zombies") end
         if badSpeed > 0 then SEM.Runner.warn(run, "speed " .. o.speed .. " could not be set on " .. badSpeed .. " zombies") end
         local ok, got = pcall(function() return st.refs[1].z:getSpeedType() end)
-        print("[SEM] run " .. run.id .. " super speed readback: set " .. o.speed .. " (expect " .. Super.SPEEDTYPE[o.speed]
+        SEM.Runner.log(run, "super speed readback: set " .. o.speed .. " (expect " .. Super.SPEEDTYPE[o.speed]
             .. "), getSpeedType " .. (ok and tostring(got) or "failed"))
         run.data.spawned = st.spawned
         run.placed = true

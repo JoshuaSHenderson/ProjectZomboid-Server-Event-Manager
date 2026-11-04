@@ -309,10 +309,134 @@ function Targets.prefer(first, sample, classOf, class, tries)
     return first
 end
 
+-- ---- Crash site list (Josh: "specify where the plane can spawn, and random chooses from our list") ----
+
+local SITE_MODES = { nearRandomPlayer = true, nearChosenPlayer = true, countryside = true }
+
+-- Pure. ctx = { recent = {{x,y}}, strikes = { ["x,y"] = n }, blocked = fn(x,y) or nil, maxRange, spacing, maxStrikes, rand = fn(n) 0..n-1 }.
+-- sites = { {x,y,r,k} }. A plane needs k == "plane"; a helicopter fits any. Picks at random among sites lo..hi tiles from
+-- (cx,cy); when none, widens hi by half each step up to ctx.maxRange and picks the nearest. Returns site, distance, or nil.
+function Targets.pickSite(sites, cx, cy, lo, hi, kind, ctx)
+    local ok = {}
+    for _, s in ipairs(sites) do
+        local fits = kind ~= "plane" or s.k == "plane"
+        if fits and (ctx.strikes[s.x .. "," .. s.y] or 0) < ctx.maxStrikes and not (ctx.blocked and ctx.blocked(s.x, s.y)) then
+            local near = false
+            for _, u in ipairs(ctx.recent) do
+                if (u.x - s.x) ^ 2 + (u.y - s.y) ^ 2 < ctx.spacing ^ 2 then near = true break end
+            end
+            if not near then ok[#ok + 1] = { s = s, d = math.sqrt((s.x - cx) ^ 2 + (s.y - cy) ^ 2) } end
+        end
+    end
+    local widened = false
+    while true do
+        local hit, best = {}, nil
+        for _, e in ipairs(ok) do
+            if e.d >= lo and e.d <= hi then
+                hit[#hit + 1] = e
+                if not best or e.d < best.d then best = e end
+            end
+        end
+        if #hit > 0 then
+            local e = widened and best or hit[ctx.rand(#hit) + 1]
+            return e.s, e.d
+        end
+        if hi >= ctx.maxRange then return nil end
+        hi, widened = math.min(ctx.maxRange, math.floor(hi * 1.5)), true
+    end
+end
+
+local function world() return SEM.Store and SEM.Store.world end
+
+-- Pure. Records {x,y,r,k} into list unless a site in known or list is within dedupe tiles; the oldest learned site goes at max.
+function Targets.addLearned(list, known, x, y, r, k, dedupe, max)
+    for _, l in ipairs({ known, list }) do
+        for _, s in ipairs(l) do
+            if (s.x - x) ^ 2 + (s.y - y) ^ 2 < dedupe ^ 2 then return false end
+        end
+    end
+    list[#list + 1] = { x = x, y = y, r = r, k = k }
+    -- ponytail: oldest-first drop, no scoring; fine while sites are cheap to relearn
+    while #list > max do table.remove(list, 1) end
+    return true
+end
+
+-- the Crash wreck stood at (x,y) with footprint r: remember the spot for the site list
+function Targets.learnSite(x, y, r, aircraft)
+    local w = world()
+    if not w then return false end
+    return Targets.addLearned(w.learnedSites, require("SEM/CrashSites"), x, y, r, aircraft == "plane" and "plane" or "heli", C.SITE_DEDUPE, C.SITE_LEARNED_MAX)
+end
+
+-- a placement at the listed site failed: one strike; at C.SITE_STRIKES it is skipped for this world
+function Targets.strikeSite(site)
+    local w = world()
+    if not (w and site) then return end
+    local key = site.x .. "," .. site.y
+    w.siteStrikes[key] = (w.siteStrikes[key] or 0) + 1
+end
+
+-- where the mode aims: cx, cy, lo, hi, player name; or nil
+local function aim(o, anchor)
+    if o.locationMode == "countryside" then
+        local list = Targets.players()
+        if #list > 0 then
+            local pl = pick(list)
+            return pl:getX(), pl:getY(), C.RING_MIN, C.RING_MAX, tostring(pl:getUsername())
+        end
+        if anchor then return anchor.x, anchor.y, C.RING_MIN, C.RING_MAX, "anchor" end
+        return nil
+    end
+    local pl
+    if o.locationMode == "nearChosenPlayer" then
+        for _, p in ipairs(Targets.players()) do if p:getUsername() == o.chosenPlayer then pl = p end end
+    else
+        local list = Targets.eligible(o)
+        if #list > 0 then pl = pick(list) end
+    end
+    if pl then return pl:getX(), pl:getY(), 40, 100, tostring(pl:getUsername()) end
+    if o.locationMode == "nearRandomPlayer" and anchor and #Targets.players() == 0 then return anchor.x, anchor.y, 40, 100, "anchor" end
+end
+
+-- Crash with useSiteList in a random-player mode: a listed or learned site, or nil (the normal random flow then runs)
+function Targets.siteFromList(o, anchor, run)
+    local cx, cy, lo, hi, who = aim(o, anchor)
+    if not cx then return nil end
+    local w = world()
+    local builtIn = require("SEM/CrashSites")
+    local all = {}
+    for _, s in ipairs(builtIn) do all[#all + 1] = s end
+    for _, s in ipairs(w and w.learnedSites or {}) do all[#all + 1] = s end
+    local s, d = Targets.pickSite(all, cx, cy, lo, hi, o.aircraft, {
+        recent = w and w.recentSites or {}, strikes = w and w.siteStrikes or {}, maxRange = C.SITE_MAX_RANGE, spacing = C.SITE_SPACING,
+        maxStrikes = C.SITE_STRIKES, rand = ZombRand,
+        blocked = o.respectProtected ~= false and SEM.Safety.isProtected or nil,
+    })
+    if not s then
+        if run and SEM.Runner then SEM.Runner.warn(run, "site list: no site within " .. C.SITE_MAX_RANGE .. " tiles, using a random spot") end
+        return nil
+    end
+    if w then
+        w.recentSites[#w.recentSites + 1] = { x = s.x, y = s.y }
+        while #w.recentSites > C.SITE_RECENT do table.remove(w.recentSites, 1) end
+    end
+    local builtin = false
+    for _, b in ipairs(builtIn) do if b == s then builtin = true break end end
+    if run and SEM.Runner then
+        SEM.Runner.log(run, "site list: " .. s.x .. "," .. s.y .. " r=" .. s.r .. " (" .. (builtin and "builtin" or "learned") .. ") " .. math.floor(d) .. " tiles from " .. who)
+    end
+    return { x = s.x, y = s.y, z = 0, site = { x = s.x, y = s.y } }
+end
+
 -- prefer = an optional class name ("road" for Convoy Wreck): random modes then try for a site of that class first
-function Targets.resolve(options, prefer, anchor)
+function Targets.resolve(options, prefer, anchor, run)
     local fn = mode[options.locationMode]
     if not fn then return nil, "unknown location mode " .. tostring(options.locationMode) end
+    if options.useSiteList and SITE_MODES[options.locationMode] then
+        local okS, site = pcall(Targets.siteFromList, options, anchor, run)
+        if okS and site and Targets.inMap(site.x, site.y) then return site end
+        if not okS and run and SEM.Runner then SEM.Runner.warn(run, "site list error: " .. tostring(site)) end
+    end
     local ok, p, why = pcall(fn, options, anchor)
     if not ok then return nil, "target error: " .. tostring(p) end
     if not p then return nil, why or "no target found" end

@@ -2,8 +2,12 @@
 SEM = SEM or {}
 
 SEM.News = {
-    version = "0.3.2-beta", -- keep equal to modversion in both mod.info files
+    version = "0.4.0-beta", -- keep equal to modversion in both mod.info files
     lines = {
+        "0.4.0-beta: A new server starts with six safe events already scheduled (Reset to Default brings them back). Clean Up At End removes what an event spawned when it ends.",
+        "Aircraft Crash picks from a list of known clear sites, so planes land reliably, and its marker never moves. Under Siege waves come from several sides.",
+        "Mark Hostiles, marker colours by event kind, Flyover Volume for Airdrop, and Set all plus 30 percent chance for loot tables. Logs have timestamps and no cap.",
+        "Stuck events now end, guards no longer spawn inside wrecks, A-Life reputation is no longer lost on raiders, and marks show in first person with Stance Dots Viewpoint.",
         "0.3.2-beta: Events now carry on through log outs, a paused server and restarts. Their zombies only count as gone when killed.",
         "0.3.1-beta: Export Logs saves the event history to a text file and copies it to the clipboard.",
         "New event: Aircraft Crash. A burning helicopter or plane wreck on open ground, loot scattered round it, fires and an explosion everyone hears.",

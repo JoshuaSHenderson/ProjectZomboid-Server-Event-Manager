@@ -134,10 +134,12 @@ function Form:tick(key, x, y, value, onSet)
     local t = ISTickBox:new(x, y + 1, 20, 20, "", nil, function(_, _, sel) onSet(sel == true) end)
     t:initialise()
     t:instantiate()
+    -- addChild first: ISTickBox:addOption calls setHeight, and an element with no parent counts as a window that must stay on screen
+    -- (ISUIElement:getKeepOnScreen), so its y was clamped to screen height minus 20. A tick below the screen's bottom edge landed 4 rows up (#19).
+    self.view:addChild(t)
     t:addOption("")
     t:setSelected(1, value == true)
     t.choicesColor = T.c.amber
-    self.view:addChild(t)
     return self:reg(key, t)
 end
 

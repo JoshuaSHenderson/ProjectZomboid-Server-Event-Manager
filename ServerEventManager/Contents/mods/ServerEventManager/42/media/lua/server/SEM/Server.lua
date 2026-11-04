@@ -60,6 +60,15 @@ local admin = {}
 
 function admin.getSnapshot() end
 
+-- the Logs pane catching up: entries after number `since` (one batch; more = ask again), top = the newest number the server has
+-- (lower than the client's means the world was reset)
+function admin.getLog(player, args)
+    local since = type(args.since) == "number" and args.since or 0
+    local out, more = SEM.Runner.logSince(since)
+    sendServerCommand(player, MODULE, "logBatch", { entries = out, more = more, top = Store.world.logSeq or 0 })
+    return nil, nil, true
+end
+
 function admin.saveEvent(player, args)
     local d, errs = def(args)
     if not d then return errs end
@@ -136,6 +145,24 @@ function admin.renamePreset(player, args)
     if isDefault(new) then return { new = "Default is reserved for the event's own settings" } end
     if Store.config.presets[new] then return { new = "a preset with this name exists" } end
     Store.renamePreset(old, new)
+end
+
+function admin.ackDefaultSetup(player)
+    local ds = Store.config.defaultSetup
+    if not ds then return { _ = "no default setup" } end
+    ds.seen = true
+end
+
+-- deletes every schedule (running events carry on), then rebuilds the starter schedules and their presets. The user's own presets stay.
+function admin.resetToDefault(player)
+    local old = {}
+    for id in pairs(Store.config.schedules) do old[#old + 1] = id end
+    for _, id in ipairs(old) do Store.deleteSchedule(id) end
+    Store.createDefaultSetup(Store.config)
+    local ds = Store.config.defaultSetup
+    ds.seen = true -- the admin who pressed it knows
+    SEM.Scheduler.startDefaultSetup("default setup restored by " .. name(player) .. ": " .. #ds.ids .. " schedules")
+    for _, id in ipairs(ds.ids) do SEM.Scheduler.refresh(Store.config.schedules[id]) end
 end
 
 function admin.saveLimits(player, args)
@@ -267,6 +294,12 @@ function public.hello(player)
     sendServerCommand(player, MODULE, "eventTags", SEM.Spawn.tagLists())
     -- weapon packs of groups already spawned, for NPCs this client may come to own (shared/SEM/WeaponPacks.lua)
     if SEM.WeaponPacks and not SEM.empty(SEM.WeaponPacks.armed) then sendServerCommand(player, MODULE, "armedAll", { groups = SEM.WeaponPacks.armed }) end
+    local ds = SEM.isAdmin(player) and Store.config and Store.config.defaultSetup
+    if ds and not ds.seen then -- Logs line plus the on-screen banner event notices use
+        local text = SEM.Fmt.defaultSetupText(Store.config, true)
+        sendServerCommand(player, MODULE, "notice", { text = text })
+        sendServerCommand(player, MODULE, "alert", { title = "Default setup created", message = text, sound = true })
+    end
     local ok, err = pcall(SEM.Scheduler.hello)
     if not ok then print("[SEM] scheduler error on hello: " .. tostring(err)) end
 end

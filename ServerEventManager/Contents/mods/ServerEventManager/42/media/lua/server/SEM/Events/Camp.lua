@@ -64,8 +64,10 @@ local function onSpawned(body, uid)
     if not ok then return end
     eachCamp(function(run)
         local x, y = run.data.claimX or run.x, run.data.claimY or run.y -- a siege wave appears away from the base
-        if run.data.uids and x and Camp.claim(run.data, uid, dist(bx, by, x, y), SEM.Runner.clock()) then
-            print("[SEM] run " .. run.id .. " " .. run.eventId .. ": A-Life NPC " .. uid .. " joined (" .. #run.data.uids .. " of " .. run.data.want .. ")")
+        local d = x and dist(bx, by, x, y)
+        for _, p in ipairs(run.data.claimPts or {}) do d = math.min(d or 1e9, dist(bx, by, p.x, p.y)) end -- a siege wave spawns at several points
+        if run.data.uids and d and Camp.claim(run.data, uid, d, SEM.Runner.clock()) then
+            SEM.Runner.log(run, "A-Life NPC " .. uid .. " joined (" .. #run.data.uids .. " of " .. run.data.want .. ")")
         end
         for _, u in ipairs(run.data.uids or {}) do
             if u == uid then Spawn.tagNpc(run, uid, run.eventId == "stranger" and "FriendlyNpc" or "HostileNpc") end
@@ -118,9 +120,11 @@ local function place(run, o)
     local what, made = nil, 0
     if SEM.Compat_ALife.available() then
         local why, kind
-        made, why, kind = SEM.Compat_ALife.spawnCamp(Spawn.nearestPlayer(x, y), x, y, z, o.groupSize, o.npcTier, o.guardLeash, o.npcDifficulty, Spawn.weaponPack(o, run))
+        local scene
+        made, why, kind, scene = SEM.Compat_ALife.spawnCamp(Spawn.nearestPlayer(x, y), x, y, z, o.groupSize, o.npcTier, o.guardLeash, o.npcDifficulty, Spawn.weaponPack(o, run))
         if made > 0 then
             d.want, d.uids, d.dead, d.claimUntil = made, {}, {}, SEM.Runner.clock() + C.CAMP_CLAIM
+            d.scene = scene -- A-Life's scene key, for Clean Up
             hookALife()
             local info = SEM.Compat_ALife.campInfo()
             what = made .. " Level " .. tostring(o.npcTier):sub(5) .. " survivors"
@@ -147,7 +151,7 @@ local function place(run, o)
     Spawn.guards(run, sq, n, 8, 0, outfit, st.refs, function(spawned)
         d.placing = nil
         st.tracked = #st.refs
-        if spawned == 0 then return SEM.Runner.fail(run, "no loaded ground for the raider zombies") end
+        if spawned == 0 then d.noRaiders = true end -- success, not failure: update ends it
         d.zombies = spawned
         finish(run, o, spawned .. " raider zombies (" .. outfit .. ")")
     end)
@@ -170,6 +174,7 @@ function Camp.update(run)
     hookALife()
     local d, now = run.data, SEM.Runner.clock()
     if d.released then return "released by a restart; the raiders stay in the world" end
+    if d.noRaiders and not d.crates then return "no raider zombies could spawn" end -- with a crate it carries on as a loot site
     if d.crates and Spawn.cratesEmpty(run) then return "all loot taken" end
     local st, left, total = Camp.state[run.id], nil, nil
     if not st and not d.want then -- a restart lost the raiders' list: rebuilt from the ledger
@@ -194,11 +199,17 @@ function Camp.remaining(run)
     return Spawn.refPoints(st and st.refs), "raiders"
 end
 
+-- Clean Up At End: takes down the camp scene A-Life built (the NPCs are retired by Spawn.cleanUp)
+function Camp.cleanup(run)
+    local key = run.data and run.data.scene
+    if key and not SEM.Compat_ALife.removeScene(key) then SEM.Runner.log(run, "camp scene " .. key .. " not removed", true) end
+end
+
 -- A-Life NPCs and their camp belong to A-Life and cannot be removed from here; zombies stay as in Horde. Both are stated.
 function Camp.stop(run, why)
     local d = run.data or {}
     local notes = { Spawn.removeCrates(run, why, true) }
-    if d.want then
+    if d.want and not (run.options and run.options.cleanUp == true) then
         local n = math.max(0, d.want - Camp.deadCount(d))
         notes[#notes + 1] = n .. " A-Life NPC(s) and any camp scene stay in the world; A-Life manages them"
     end
@@ -210,7 +221,7 @@ function Camp.stop(run, why)
     end
     if #notes == 0 then return nil end
     local note = table.concat(notes, "; ")
-    print("[SEM] run " .. run.id .. ": " .. note)
+    SEM.Runner.log(run, note)
     return note
 end
 

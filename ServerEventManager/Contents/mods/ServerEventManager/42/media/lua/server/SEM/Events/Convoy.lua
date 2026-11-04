@@ -93,9 +93,9 @@ local function wreck(car, pct)
 end
 
 -- a square for a vehicle: suits the event and no vehicle already overlaps it
-local function vehicleSquare(x, y, radius, o, used)
+local function vehicleSquare(x, y, radius, o, used, inside)
     for _ = 1, 8 do
-        local sq = Spawn.findSquare(x, y, radius, o, used)
+        local sq = Spawn.findSquare(x, y, radius, o, used, inside)
         if not sq then return nil end
         local clash = false
         pcall(function() clash = sq:isVehicleIntersecting() end)
@@ -105,7 +105,9 @@ local function vehicleSquare(x, y, radius, o, used)
 end
 
 local function place(run, o)
-    Spawn.clearSite(run, o)
+    -- D4: the circle players see never moves; the Avoid Forest shift and the first car stay inside it
+    local inside = Spawn.inCircle(run)
+    Spawn.clearSite(run, o, inside)
     local known = knownVehicles()
     local list, pack, entry = Convoy.packIds(o.vehiclePack, SEM.Store.config.vehiclePacks, ZombRand)
     if not pack then SEM.Runner.warn(run, "vehicle pack " .. entry .. " no longer exists, using the default cars") end
@@ -114,7 +116,7 @@ local function place(run, o)
     local squares, cars, used, made, failed = {}, {}, {}, 0, 0
     for _, id in ipairs(Convoy.pick(ids, o.vehicleCount, ZombRand)) do
         local first = squares[1]
-        local sq = vehicleSquare(first and first:getX() or run.x, first and first:getY() or run.y, first and 14 or 12, o, used)
+        local sq = vehicleSquare(first and first:getX() or run.x, first and first:getY() or run.y, first and 14 or 12, o, used, inside) -- every car inside the circle (D4)
         local car
         if sq then
             used[sq:getX() .. "," .. sq:getY()] = true
@@ -126,6 +128,7 @@ local function place(run, o)
             -- unproven on a server: the engine may already replicate it, so a failure here is not fatal
             pcall(function() car:transmitCompleteItemToClients() end)
             wreck(car, o.damage)
+            Spawn.tagCar(run, car, sq)
             made = made + 1
             squares[#squares + 1] = sq
             cars[#cars + 1] = car
@@ -158,7 +161,10 @@ local function place(run, o)
     end
     local done = false
     run.data.placing = true
-    Spawn.siteGuards(run, o, squares, function(...) done = true; run.data.placing = nil; report(...) end, st.refs)
+    -- guards stand 10 tiles from every car's square: a car is ~2 x 5 (half its longest side, rounded up, 3) + 1 + the spread 6
+    local ring = Spawn.ringPoints(squares[1]:getX(), squares[1]:getY(), 10, 3, squares, 10)
+    Spawn.siteGuards(run, o, #ring > 0 and ring or squares, function(...) done = true; run.data.placing = nil; report(...) end, st.refs,
+        #ring > 0 and Spawn.GUARD_RING_RADIUS or nil)
     if not done then
         SEM.Runner.status(run, "Wreck: " .. made .. " vehicle(s), " .. loot .. "spawning guards")
     end
@@ -210,7 +216,7 @@ function Convoy.stop(run, why)
     local notes = {}
     if why == "cancel" then notes[1] = Spawn.removeCrates(run, why, false) else run.data.crates = nil end
     Convoy.state[run.id] = nil
-    local n = run.data and run.data.vehicles or 0
+    local n = run.options and run.options.cleanUp == true and 0 or run.data and run.data.vehicles or 0 -- Clean Up has dealt with them
     if n > 0 then notes[#notes + 1] = n .. " wrecked vehicle(s) stay in the world" end
     if #notes == 0 then return nil end
     return table.concat(notes, "; ")

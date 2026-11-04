@@ -64,7 +64,13 @@ end
 local function isGame(entry) local m = entry.schedule.mode return m == "randomGame" or m == "scheduledGame" or m == "onceGame" end
 
 local function stamp(now) return Fmt.DAYS[now.dow] .. string.format(" %02d:%02d", now.hour, now.minute) end
-local function gameStamp(h) return string.format("Day %d %02d:00", math.floor(h / 24) + 1, math.floor(h % 24)) end
+local function gameStamp(h)
+    local m = math.floor(h * 60 + 1e-6)
+    return string.format("Day %d %02d:%02d", math.floor(m / 1440) + 1, math.floor(m / 60) % 24, m % 60)
+end
+
+-- Random Game Time waits whole hours from "now", which keeps the minute of now; a random minute makes the time of day fully random
+local function jitter() return (Scheduler.rng(60) - 1) / 60 end
 
 -- sets a display field; true when it changed
 local function put(entry, field, text)
@@ -128,13 +134,13 @@ local function rollFirst(entry, hours)
     local sc = entry.schedule
     if sc.mode == "onceGame" then return hours + (sc.afterHours or 1) end
     if sc.mode == "scheduledGame" then return S.nextScheduledHour(hours, sc.everyDays, sc.atHour) end
-    return math.max(hours + sc.firstDelayDays * 24, S.nextGameHour(hours, sc.minDays, sc.maxDays, Scheduler.rng))
+    return math.max(hours + sc.firstDelayDays * 24, S.nextGameHour(hours, sc.minDays, sc.maxDays, Scheduler.rng) + jitter())
 end
 
 local function rollNext(entry, hours)
     local sc = entry.schedule
     if sc.mode == "scheduledGame" then return S.nextScheduledHour(hours, sc.everyDays, sc.atHour) end
-    return S.nextGameHour(hours, sc.minDays, sc.maxDays, Scheduler.rng)
+    return S.nextGameHour(hours, sc.minDays, sc.maxDays, Scheduler.rng) + jitter()
 end
 
 -- recomputes entry.next (and rolls a first game slot if there is none); true when the text changed
@@ -297,15 +303,25 @@ function Scheduler.randomTiming(rng)
     return { mode = "randomGame", minDays = lo, maxDays = lo + rng(4), firstDelayDays = rng(3), quietStart = 0, quietEnd = 0, everyDays = 7, atHour = 20, windows = {} }
 end
 
--- Adds count Random Game Time entries, cycling through the saved presets in a shuffled order so each is used
--- before any repeats. Never touches an existing entry. Names stay unique: "Auto: <preset>", then " 2", " 3".
+-- What Generate Random picks from: every saved preset plus each event's Default (preset "", the event page's own settings, D39),
+-- as { label, eventId, preset } sorted by label. A Default's label is "<Event title> Default".
+function Scheduler.pool()
+    local pool = {}
+    for n, p in pairs(Store.config.presets) do pool[#pool + 1] = { label = n, eventId = p.eventId, preset = n } end
+    for _, d in ipairs(SEM.EventDefs) do
+        if Store.config.events[d.id] and SEM.Events[d.id] then pool[#pool + 1] = { label = d.title .. " Default", eventId = d.id, preset = "" } end
+    end
+    table.sort(pool, function(a, b) return a.label < b.label end)
+    return pool
+end
+
+-- Adds count Random Game Time entries, cycling through Scheduler.pool in a shuffled order so each is used
+-- before any repeats. Never touches an existing entry. Names stay unique: "Auto: <label>", then " 2", " 3".
 -- Returns made, and why it stopped early (nil when all were made); or nil and why when none could be
 function Scheduler.generate(count)
     if not ready() then return nil, "not ready" end
-    local names = {}
-    for n in pairs(Store.config.presets) do names[#names + 1] = n end
-    if #names == 0 then return nil, "Save a preset on an event page first" end
-    table.sort(names)
+    local names = Scheduler.pool()
+    if #names == 0 then return nil, "No event to run" end
     local used = {}
     for _, e in pairs(Store.config.schedules) do used[e.name] = true end
     local made, at, why = 0, #names
@@ -325,10 +341,10 @@ function Scheduler.generate(count)
         local n, k, name = names[at], 1, nil
         repeat
             local suffix = k == 1 and "" or (" " .. k)
-            name = (Scheduler.AUTO .. n):sub(1, 40 - #suffix) .. suffix
+            name = (Scheduler.AUTO .. n.label):sub(1, 40 - #suffix) .. suffix
             k = k + 1
         until not used[name]
-        local ok, entry = Store.validateEntry({ name = name, eventId = Store.config.presets[n].eventId, preset = n, enabled = true,
+        local ok, entry = Store.validateEntry({ name = name, eventId = n.eventId, preset = n.preset, enabled = true,
             schedule = Scheduler.randomTiming(Scheduler.rng), conditions = SEM.Conditions.defaults() })
         if ok then
             used[name] = true
@@ -340,9 +356,32 @@ function Scheduler.generate(count)
     return made, why
 end
 
+-- Once, on the first start after a fresh install made the default setup: the first runs are spread 2 game days apart,
+-- the first 3 game hours in, so events begin soon instead of after a full wait; then the Logs line says what was made.
+function Scheduler.startDefaultSetup(logText)
+    local ds = Store.config.defaultSetup
+    if not ds or ds.started then return end
+    local hours = Scheduler.worldHours()
+    if not hours then return end -- retried on the next start
+    local names = {}
+    local at = hours
+    for i, id in ipairs(ds.ids) do
+        local e = Store.config.schedules[id]
+        if e then
+            -- first 2 to 6 game hours in, each next 1.5 to 2.5 game days after the previous, at a random minute: no shared clock time
+            at = at + (i == 1 and 2 + (Scheduler.rng(241) - 1) / 60 or 36 + (Scheduler.rng(1441) - 1) / 60)
+            Store.world.nextGameHour[id] = at
+            names[#names + 1] = e.name
+        end
+    end
+    ds.started = true
+    Runner.log(nil, logText or ("Default setup created: " .. #names .. " scheduled events (" .. table.concat(names, ", ") .. "). Review them in Scheduler and Options."))
+end
+
 function Scheduler.init()
     if not ready() then return end
     lastReal, lastHello, lastPruneDay = nil, nil, nil
+    Scheduler.startDefaultSetup()
     for _, entry in ipairs(entries()) do Scheduler.refresh(entry) end
 end
 

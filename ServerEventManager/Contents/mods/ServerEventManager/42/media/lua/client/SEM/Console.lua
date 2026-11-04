@@ -162,7 +162,7 @@ function Console:initialise()
         if name then SEM.Net.line("Logs saved to Zomboid/Lua/" .. name .. " and copied to the clipboard")
         else SEM.Net.line("Export failed: " .. tostring(why), true) end
     end)
-    self.exportBtn:setTooltip("Saves the event history and notices to a text file in your Zomboid/Lua folder and copies them to the clipboard.")
+    self.exportBtn:setTooltip("Saves the log, with times, to a text file in your Zomboid/Lua folder and copies them to the clipboard.")
     for _, c in ipairs({ self.closeBtn, self.copyBtn, self.pasteBtn, self.reloadBtn, self.saveBtn, self.saveAsBtn, self.dupBtn, self.cancelBtn, self.delBtn, self.forceBtn, self.active, self.logs, self.exportBtn }) do self:addChild(c) end
     T.grip(self, MINW, MINH)
     self:layout()
@@ -539,7 +539,12 @@ end
 
 function Console.onSnapshot(ack)
     local c = Console.instance
-    if c then c:syncDrafts(ack) end
+    if not c then return end
+    c:syncDrafts(ack)
+    -- Home was drawn before this snapshot may have arrived: redraw it when the default-setup banner appears or goes
+    local snap = Net.snapshot
+    local ds = snap and snap.config and snap.config.defaultSetup
+    if c.sel == "home" and (ds ~= nil and not ds.seen) ~= (c.homeBanner == true) then c:rebuildLater() end
 end
 
 function Console.onError(cmd, errs, ack)

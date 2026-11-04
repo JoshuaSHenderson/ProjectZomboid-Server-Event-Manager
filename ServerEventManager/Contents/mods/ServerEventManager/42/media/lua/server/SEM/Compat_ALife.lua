@@ -152,6 +152,41 @@ end
 
 local seq = 0
 
+-- Play test 3: A-Life copies groupId (not requestId) into an NPC's memory, so the groups SEM spawns are remembered by groupId in
+-- Store.world.semGroups[groupId] = { kind = "hostile"|"stranger", at = ms }.
+-- ponytail: no runId (callers do not pass one); entries older than SEMGROUP_TTL_MS are dropped on the next record. A run alive
+-- longer than that loses Clean Up for its NPCs; pass the run id in if runs ever last days.
+local SEMGROUP_TTL_MS = 3 * 24 * 3600 * 1000
+local function recordGroup(groupId, kind)
+    local w = SEM.Store and SEM.Store.world
+    if not (w and groupId ~= nil) then return end
+    w.semGroups = type(w.semGroups) == "table" and w.semGroups or {}
+    local now = getTimestampMs()
+    for id, e in pairs(w.semGroups) do
+        if type(e) ~= "table" or type(e.at) ~= "number" or now - e.at > SEMGROUP_TTL_MS or e.at > now then w.semGroups[id] = nil end
+    end
+    w.semGroups[tostring(groupId)] = { kind = kind, at = now }
+end
+
+-- "hostile" or "stranger" when the record is an NPC SEM spawned, else nil
+local function semKind(rec)
+    local m = type(rec) == "table" and rec.memory
+    if type(m) ~= "table" then return nil end
+    if m.groupId ~= nil then
+        local sg = SEM.Store and SEM.Store.world and SEM.Store.world.semGroups
+        local e = sg and sg[tostring(m.groupId)]
+        return e and e.kind or nil
+    end
+    -- an older save, or a record without a groupId: the requestId prefix, then the hostile stance flags
+    if type(m.requestId) == "string" then
+        if string.sub(m.requestId, 1, 11) == "sem-guards:" then return "hostile" end
+        if string.sub(m.requestId, 1, 13) == "sem-stranger:" then return "stranger" end
+        return nil
+    end
+    if m.spawnStance == "hostile" and m.hostileOverride ~= nil and m.hostileOverride ~= false then return "hostile" end
+    return nil
+end
+
 -- ---- weapon packs: shared/SEM/WeaponPacks.lua (the plan wrapper runs on server and client) ----
 local WP = SEM.WeaponPacks
 Compat.armed, Compat.hashPick, Compat.splitPack, Compat.loadout = WP.armed, WP.hashPick, WP.splitPack, WP.loadout
@@ -208,6 +243,7 @@ local function group(anchorPlayer, x, y, z, count, tier, radius, leash, firstMod
         local ids = Compat.pickProfiles(def, want, ZombRand) -- one shuffle for the whole group, split over the requests
         local made, why, at = 0, nil, 0
         if pack then wrapPlan() end
+        Compat.wrapReputation()
         for i, n in ipairs(Compat.split(want)) do
             seq = seq + 1
             local args = { mode = i == 1 and firstMode or "guard", x = x, y = y, z = z, radius = radius, count = n, separation = 1,
@@ -228,6 +264,13 @@ local function group(anchorPlayer, x, y, z, count, tier, radius, leash, firstMod
             local r = service.rawSpawn(anchorPlayer, args, true)
             if type(r) == "table" and r.accepted and r.accepted > 0 then
                 made = made + r.accepted
+                recordGroup(r.groupId, "hostile")
+                if i == 1 and firstMode == "camp" then -- the scene A-Life built, for Compat.removeScene (read as its admin Undo does)
+                    pcall(function()
+                        local g = service.groups[args.requestId]
+                        if g and g.sceneCreated == true and type(g.sceneKey) == "string" then Compat.lastScene = g.sceneKey end
+                    end)
+                end
                 -- rawSpawn only queues jobs; Service.tick hydrates them later, so the group is known here in time
                 if pack and r.groupId then
                     local entry = { weapons = pack.weapons, ammo = pack.ammo }
@@ -258,8 +301,13 @@ end
 -- ages out itself) was judged too fragile, see docs/spikes.md "Hostile camp". When the scene is refused (no clear ground,
 -- no SceneKit) the group is spawned as plain guards instead. Returns made, reason (when 0) and "camp" or "guard".
 function Compat.spawnCamp(anchorPlayer, x, y, z, count, tier, leash, difficulty, pack)
+    Compat.lastScene = nil
     local made, why = group(anchorPlayer, x, y, z, count, tier, leash, leash, "camp", nil, difficulty, pack)
-    if made > 0 then return made, nil, "camp" end
+    if made > 0 and not Compat.lastScene and not Compat.sceneLogged then
+        Compat.sceneLogged = true -- once: Clean Up cannot take this camp scene down
+        print("[SEM] A-Life camp scene key missing after rawSpawn; Clean Up will not remove the scene")
+    end
+    if made > 0 then return made, nil, "camp", Compat.lastScene end
     local plain, plainWhy = group(anchorPlayer, x, y, z, count, tier, leash, leash, "guard", nil, difficulty, pack)
     if plain > 0 then return plain, nil, "guard" end
     return 0, plainWhy or why, "guard"
@@ -292,7 +340,10 @@ function Compat.spawnStranger(player, x, y, z)
             playerStance = "friendly", hostileOverride = "friendly", supportPolicy = "disabled", leashRadius = 6,
             profileIds = { fac.profileIds[ZombRand(#fac.profileIds) + 1] },
             requestId = "sem-stranger:" .. tostring(getTimestampMs()) .. ":" .. seq }, true)
-        if type(r) == "table" and r.accepted and r.accepted > 0 then return 1, fac.factionId end
+        if type(r) == "table" and r.accepted and r.accepted > 0 then
+            recordGroup(r.groupId, "stranger")
+            return 1, fac.factionId
+        end
         return 0, nil, type(r) == "table" and tostring(r.reason) or "no answer from A-Life"
     end)
     if not ok then return 0, nil, "A-Life call failed: " .. tostring(made) end
@@ -336,6 +387,30 @@ function Compat.huntFix(uid, player)
         return true
     end)
     return ok and done
+end
+
+-- Removes an NPC from the world by uid through A-Life's own despawn (DebugService.purgeActor: SpawnService.retire, then
+-- Executor.release; what its admin console's Undo and "Remove NPCs" use). True when A-Life retired it; false when it is gone/dead/unknown
+-- or is not one SEM spawned (a camp's claim window can take in an A-Life NPC of its own).
+-- Returns true, or false and why: "missing" (not registered), "not_sem", or A-Life's own refusal text.
+function Compat.retire(uid)
+    local ok, done, why = pcall(function()
+        local actor = ProjectALife.ActorRegistry.peek(uid)
+        if not actor then return false, "missing" end
+        local rec = ProjectALife.Relations.actorRecord(actor)
+        if not semKind(rec) then return false, "not_sem" end
+        return ProjectALife.DebugService.purgeActor(actor, "sem_cleanup")
+    end)
+    if not ok then return false, tostring(done) end
+    if done == true then return true end
+    return false, why ~= nil and tostring(why) or "refused"
+end
+
+-- Takes down a camp scene (tents, fire) by the key spawnCamp returned: A-Life's SceneKit.remove, what its admin Undo calls. A-Life
+-- removes only objects it tagged with that key, never anything else. True when it removed the scene.
+function Compat.removeScene(key)
+    local ok, done = pcall(function() return ProjectALife.SceneKit.remove(key) end)
+    return ok and done == true
 end
 
 -- A-Life's Movement walks an NPC with this flag wherever it would run. A-Life may clear it, so callers set it each update.
@@ -392,6 +467,7 @@ end
 -- that they exist as fields of Events on the server and carry (body, uid).
 local hooked = false
 function Compat.hookEvents(onSpawned, onDied)
+    pcall(Compat.wrapReputation) -- also covers a restart, before any new spawn: saved SEM NPCs keep their flag
     if hooked then return true end
     if not Events then return false end
     local ok = pcall(function()
@@ -402,6 +478,40 @@ function Compat.hookEvents(onSpawned, onDied)
     end)
     hooked = ok
     return hooked
+end
+
+-- D13: an A-Life actor record SEM spawned hostile. A-Life persists rec.memory, so the requestId prefix survives a restart
+-- (the in-memory WP.armed table does not). A record without a requestId falls back to the hostile stance flags.
+function Compat.isSemHostile(rec)
+    return semKind(rec) == "hostile"
+end
+
+local REP_SOFT = { surrendered = true, neutral = true, careful = true, friendly = true, unknown = true, attackedFirst = true }
+
+-- Once. SEM's hostile NPCs always count as hostile for A-Life reputation (never surrendered/neutral) and never flip their
+-- faction hostile. A-Life only scores reputation on the server (authoritative()), so this file's server-only guard is enough.
+-- True when both A-Life functions are wrapped; false (no error) when A-Life is absent or renamed them.
+function Compat.wrapReputation()
+    local P, R = ProjectALife and ProjectALife.PersonalRep, ProjectALife and ProjectALife.Reputation
+    if not (P and R and type(P.classify) == "function" and type(R.escalate) == "function") then return false end
+    if P.semRep and R.semRep then return true end
+    local classify, escalate = P.classify, R.escalate
+    P.classify = function(actor, ...)
+        local class = classify(actor, ...)
+        if REP_SOFT[class] and Compat.isSemHostile(actor) then
+            local ok, bloc = pcall(P.repBlocOf, actor)
+            return ok and (bloc == "crime" or bloc == "raider") and "crime" or "hostile"
+        end
+        return class
+    end
+    R.escalate = function(player, victim, ...)
+        local rel = ProjectALife.Relations
+        local ok, rec = pcall(function() return rel and rel.actorRecord(victim) end)
+        if ok and Compat.isSemHostile(rec) then return false, "sem_hostile" end
+        return escalate(player, victim, ...)
+    end
+    P.semRep, R.semRep = true, true
+    return true
 end
 
 -- true when A-Life is loaded enough to try rawSpawn

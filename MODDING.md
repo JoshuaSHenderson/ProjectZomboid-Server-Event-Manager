@@ -86,6 +86,7 @@ refused event changes nothing.
 | `id` | yes | Lowercase: `a-z`, `0-9`, `_`, starts with a letter, 40 characters at most, not already taken (built-in ids are `airdrop`, `camp`, `horde`, `wildfire`, `super`, `convoy`, `siege`, `stranger`, `hunted`, `crash`). |
 | `title` | yes | Non-empty text. Shown in the rail, the page header, the Logs and the players' event bar. Not translated. |
 | `options` | yes | A non-empty list of option fields. |
+| `color` | no | `{ r, g, b }`, each 0 to 1: the colour of this event's map markers. Built-in events use `SEM.EventDefs.colors`; without either, markers are orange. |
 
 `registerEvent` refuses (`shared/SEM/EventDefs.lua`, `why`):
 
@@ -153,7 +154,7 @@ texts; `duration` is the default `durationMinutes`. `drop` is a set of keys to l
 
 | Group | Keys |
 | --- | --- |
-| Announcement | `title`, `message`, `startMessage`, `leadMinutes` (0-60, default 5), `soundOn`, `requireRadio` |
+| Announcement | `title`, `showWarning` (default false), `message`, `leadMinutes` (0-60, default 0), `startMessage`, `soundOn`, `requireRadio` |
 | Map marker | `markerOn`, `markerExact`, `markerRadioExact`, `fuzzyRadius` |
 | Location | `locationMode`, `location`, `town`, `chosenPlayer`, `minAgeDays`, `avoidForest` |
 | General | `durationMinutes` (1-240) |
@@ -198,7 +199,7 @@ SEM.Events.my_event = { start = start, update = update, stop = stop }
 
 ### Lifecycle
 
-States: `pending` -> `warning` (only when `leadMinutes` > 0) -> `active` -> `ending` -> `ended`, or `cancelled` / `failed`.
+States: `pending` -> `warning` (only when `showWarning` is on and `leadMinutes` > 0) -> `active` -> `ending` -> `ended`, or `cancelled` / `failed`.
 
 1. `Runner.begin` copies the options (preset or Default), resolves Random enums, scales counts, and checks the limit.
    Scheduled runs over `maxConcurrent` queue; Trigger Now always starts and is not counted.
@@ -218,6 +219,7 @@ States: `pending` -> `warning` (only when `leadMinutes` > 0) -> `active` -> `end
 | `start(run)` | Once when the run goes active. Again after a server restart while `run.placed` is not `true`. | ignored |
 | `update(run)` | Every game minute while active, unless the run is paused (see `remaining`). | a truthy value (use text) ends the run as a success with that reason; `false` or `nil` carries on |
 | `stop(run, why)` | Once, at the end. `why` is `"end"`, `"cancel"` or `"fail"`. | optional note text. Appended to the log reason on end and cancel; discarded on fail. |
+| `cleanup(run)` | Optional. Runs just before `stop` when the event's Clean Up At End option is on (add `cleanUp` from `SEM.sharedOptions` to offer it). SEM already removes crates, ground loot with `modData.semRunId`, ledger zombies, vehicles tagged with `SEM.Spawn.tagCar(run, car, square)` and A-Life NPCs; remove anything else your event made here. | ignored |
 
 All three run inside `pcall`. An error in `start` fails the run with `start error: ...`; in `update`, `update error: ...`. An
 error in `stop` is logged and the note becomes "cleanup error, see server log".

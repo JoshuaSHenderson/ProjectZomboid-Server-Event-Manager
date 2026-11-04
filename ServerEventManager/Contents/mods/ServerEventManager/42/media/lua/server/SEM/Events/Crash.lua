@@ -2,7 +2,8 @@
 -- ground, loot scattered on the ground around the wreck (Spawn.scatterLoot) and optional guards. The aircraft are the mod's own static vehicle scripts
 -- (media/scripts/ServerEventManager/vehicles_sem_crash.txt). They land only in a clear field (Josh, 2026-11-02): grass or
 -- dirt with no tree, building, road, water or solid object under the whole footprint. When the loaded ground near the site
--- has none, or the aircraft cannot be placed, the crash picks a new site (up to MOVES times) and then fails. No stand-in.
+-- has none, the crash lands on the best square inside the circle players see and knocks down the trees and bushes under
+-- its footprint (D4); the circle never moves. It fails only when nothing inside the circle can take it (water, buildings).
 -- Fires are started like Wildfire's, kept under FIRE_CAP squares and off protected ground by Wildfire's scans
 -- (Wildfire.contain, Wildfire.guardAll), and put out by Wildfire's sweep (Wildfire.stop), at burnMinutes and always at the end,
 -- on cancel and on failure. Wrecks and scorched ground stay in the world. Ends when the loot is taken or time is up.
@@ -31,8 +32,6 @@ local WRECK = {
     debris = { "floors_burnt_01_0", "floors_burnt_01_8", "floors_burnt_01_13", "floors_burnt_01_14", "floors_burnt_01_15" },
 }
 local SEARCH = 40 -- tiles around the site searched for a clear field, loaded squares only
-local MOVES = 5 -- new sites tried before the crash fails
-Crash.MOVES = MOVES
 local FIRE_CAP = 40 -- most squares a crash fire may burn at once: a few fires in a field, not a wildfire (Wildfire.contain)
 local LOOT_BAND = 1 -- tiles past the footprint the loot may land
 local LOOT_NEAR = 2 -- nearest the loot lands to the wreck's centre, in tiles
@@ -68,7 +67,8 @@ end
 -- offset (dx,dy) of the nearest centre within search tiles whose whole footprint (2r+1 square) passes ok(x,y). Every
 -- square is tested once, into a prefix-sum grid, so each centre costs four lookups: (2(search+r)+1)^2 ok calls in all
 -- (109^2 for the plane: search 40, radius 14). nil when none fits.
-function Crash.findClear(cx, cy, search, r, ok)
+-- inside(dx,dy), optional, limits the centres tried (the circle players see).
+function Crash.findClear(cx, cy, search, r, ok, inside)
     local R = search + r
     local n = 2 * R + 1
     local P = { [0] = {} }
@@ -87,7 +87,7 @@ function Crash.findClear(cx, cy, search, r, ok)
     for ring = 0, search do
         for dx = -ring, ring do
             for dy = -ring, ring do
-                if math.max(math.abs(dx), math.abs(dy)) == ring and clear(dx, dy) then return dx, dy end
+                if math.max(math.abs(dx), math.abs(dy)) == ring and (not inside or inside(dx, dy)) and clear(dx, dy) then return dx, dy end
             end
         end
     end
@@ -107,10 +107,11 @@ end
 
 local DIRS = { "N", "E", "S", "W" }
 
-local function spawnCar(id, sq)
+local function spawnCar(run, id, sq)
     local ok, car = pcall(function() return addVehicleDebug(id, IsoDirections[DIRS[ZombRand(#DIRS) + 1]], nil, sq) end)
     if not (ok and car) then return false end
     pcall(function() car:transmitCompleteItemToClients() end) -- unproven on a server, as in Convoy
+    Spawn.tagCar(run, car, sq)
     return true
 end
 
@@ -124,7 +125,125 @@ local function field(sq)
     return ok and good
 end
 
--- the aircraft on the nearest clear field; returns its square and footprint radius, or nil and why
+-- sprite names of natural ground cover the crash may knock down besides trees: bushes and the grass, flower and plant
+-- objects B42 puts on open ground (crops, "farming", are left alone)
+local COVER = { "vegetation", "bush", "newgrass", "grassoverlays", "d_plants", "flowerbed", "boulders" }
+
+local function spriteName(obj)
+    local ok, name = pcall(function() return obj:getSprite():getName() end)
+    return ok and type(name) == "string" and name or nil
+end
+
+-- a tree or bush the crash may knock down: the tree class, or a cover sprite
+local function removable(obj)
+    if instanceof(obj, "IsoTree") then return true end
+    local name = spriteName(obj)
+    if not name or name:find("farming") then return false end
+    for _, w in ipairs(COVER) do if name:find(w) then return true end end
+    return false
+end
+
+local BLOCK_CLASS = { "IsoThumpable", "IsoDoor", "IsoWindow", "IsoWindowFrame", "IsoGenerator" }
+local BLOCK_FLAG = { "solid", "solidtrans", "collideW", "collideN", "WallN", "WallW", "WindowN", "WindowW", "DoorWallN",
+    "DoorWallW", "HoppableN", "HoppableW", "TallHoppableN", "TallHoppableW" }
+
+-- true when obj physically blocks a crash (wall, fence, door, window, container, generator, solid), false for anything
+-- walkable-over: litter, rocks, grass overlays. Trees and cover are removable() and never block.
+local function blocks(obj)
+    if removable(obj) then return false end
+    for _, c in ipairs(BLOCK_CLASS) do if instanceof(obj, c) then return true end end
+    local name = spriteName(obj)
+    if name and (name:find("fence") or name:find("wall")) then return true end
+    local ok, hit = pcall(function()
+        if obj:getContainer() then return true end
+        local props = obj:getProperties()
+        if not props then return false end
+        for _, f in ipairs(BLOCK_FLAG) do
+            if IsoFlagType[f] and props:has(IsoFlagType[f]) then return true end
+        end
+        return false
+    end)
+    return not ok or hit
+end
+
+-- why sq cannot take the aircraft, nil when it can; second value the blocking sprite name. Loaded, outside, a floor, no
+-- water, vehicle, protection or building, nothing on it that blocks() (the floor is object 0)
+local function reject(sq)
+    if not sq then return "unloaded" end
+    local ok, why, detail = pcall(function()
+        if not (sq:isOutside() and sq:getFloor()) then return "room" end
+        if sq:getVehicleContainer() then return "vehicle" end
+        if sq:getRoom() then return "room" end
+        if Spawn.protected(sq:getX(), sq:getY()) then return "protected" end
+        if sq:getFloor():getSprite():getProperties():has(IsoFlagType.water) then return "water" end
+        local objs = sq:getObjects()
+        for i = 1, objs:size() - 1 do
+            local o = objs:get(i)
+            if blocks(o) then return "blocking", spriteName(o) or "?" end
+        end
+    end)
+    if not ok then return "error" end
+    return why, detail
+end
+
+local function clearable(sq) return reject(sq) == nil end
+
+-- one line of why nothing fit: squares rejected per reason over the search area, and the 3 commonest blocking sprites
+local function byCount(a, b) if a[2] ~= b[2] then return a[2] > b[2] end return a[1] < b[1] end
+function Crash.rejectSummary(counts, sprites)
+    local reasons, names = {}, {}
+    for k, n in pairs(counts) do reasons[#reasons + 1] = { k, n } end
+    table.sort(reasons, byCount)
+    for i, e in ipairs(reasons) do reasons[i] = e[1] .. "=" .. e[2] end
+    for k, n in pairs(sprites) do names[#names + 1] = { k, n } end
+    table.sort(names, byCount)
+    for i = 1, #names do names[i] = names[i][1] .. "=" .. names[i][2] end
+    local out = "rejected squares: " .. (#reasons > 0 and table.concat(reasons, ", ") or "none")
+    if #names > 0 then out = out .. "; commonest blockers: " .. table.concat(names, ", ", 1, math.min(3, #names)) end
+    return out
+end
+
+local function diagnose(cx, cy, R)
+    local cell, counts, sprites = getCell(), {}, {}
+    for x = cx - R, cx + R do
+        for y = cy - R, cy + R do
+            local why, name = reject(cell:getGridSquare(x, y, 0))
+            if why then
+                counts[why] = (counts[why] or 0) + 1
+                if name then sprites[name] = (sprites[name] or 0) + 1 end
+            end
+        end
+    end
+    return Crash.rejectSummary(counts, sprites)
+end
+
+-- the crash knocks down every tree and bush under the footprint r round (cx,cy); unproven on a server whether clients see it
+local function clearTrees(cx, cy, r)
+    local cell, n = getCell(), 0
+    for x = cx - r, cx + r do
+        for y = cy - r, cy + r do
+            local sq = cell:getGridSquare(x, y, 0)
+            local objs = sq and sq:getObjects()
+            for i = objs and objs:size() - 1 or 0, 1, -1 do
+                local obj = objs:get(i)
+                if removable(obj) then
+                    local ok = pcall(function() sq:transmitRemoveItemFromSquare(obj) end)
+                    if ok then n = n + 1 end
+                end
+            end
+        end
+    end
+    return n
+end
+
+-- the circle's centre and the radius a wreck may land within: the circle players see, at most SEARCH; no marker, SEARCH round the site
+local function searchCircle(run)
+    local mx, my, r = SEM.Runner.circle(run)
+    return mx, my, math.floor(math.min(r or SEARCH, SEARCH))
+end
+
+-- the aircraft on the nearest clear field inside the circle, else on the nearest ground there that only trees and bushes
+-- spoil (cleared first); returns its square and footprint radius, or nil and why
 local function placeAircraft(run, o, known)
     local kind = WRECK.aircraft[o.aircraft] and o.aircraft or "helicopter" -- an old preset has no aircraft option
     local list = {}
@@ -136,10 +255,22 @@ local function placeAircraft(run, o, known)
     if not id then return nil, "the " .. kind .. " vehicle script is missing" end
     local r = WRECK.aircraft[kind][id]
     local cell = getCell()
-    local dx, dy = Crash.findClear(run.x, run.y, SEARCH, r, function(x, y) return field(cell:getGridSquare(x, y, 0)) end)
-    if not dx then return nil, "no clear field for the " .. kind .. " within " .. SEARCH .. " tiles" end
-    local sq = cell:getGridSquare(run.x + dx, run.y + dy, 0)
-    if not spawnCar(id, sq) then return nil, id .. " could not be placed" end
+    local mx, my, rad = searchCircle(run)
+    -- the wreck's own centre may sit up to 3 tiles off its chosen square, so the square keeps that far from the rim: a fuzzy circle never shifts
+    local lim = math.max(0, rad - 3)
+    local function inside(dx, dy) return dx * dx + dy * dy <= lim * lim end
+    local dx, dy = Crash.findClear(mx, my, rad, r, function(x, y) return field(cell:getGridSquare(x, y, 0)) end, inside)
+    if not dx then
+        dx, dy = Crash.findClear(mx, my, rad, r, function(x, y) return clearable(cell:getGridSquare(x, y, 0)) end, inside)
+        if not dx then
+            SEM.Runner.warn(run, "no ground for the " .. kind .. " (footprint " .. (2 * r + 1) .. ", search " .. rad .. "): " .. diagnose(mx, my, rad + r))
+            return nil, "no ground inside the circle can take the " .. kind .. " (water or buildings)"
+        end
+        local n = clearTrees(mx + dx, my + dy, r)
+        SEM.Runner.warn(run, "no clear field in the circle, " .. n .. " trees and plants knocked down for the " .. kind)
+    end
+    local sq = cell:getGridSquare(mx + dx, my + dy, 0)
+    if not spawnCar(run, id, sq) then return nil, id .. " could not be placed" end
     return sq, r
 end
 
@@ -166,7 +297,7 @@ local function placeCars(run, o, known, cx, cy, r)
         if sq then
             used[sq:getX() .. "," .. sq:getY()] = true
             Spawn.reserve(used, sq, 4) -- a vehicle is about 3 x 6 tiles
-            if spawnCar(id, sq) then made = made + 1 end
+            if spawnCar(run, id, sq) then made = made + 1 end
         end
     end
     if made < cars then SEM.Runner.warn(run, made .. " of " .. cars .. " burnt cars could be placed") end
@@ -235,24 +366,6 @@ end
 
 local place
 
--- no clear field here: a new site from the same location options, the marker moves with it, and the wait starts again
-local function relocate(run, o, why)
-    run.data.moves = (run.data.moves or 0) + 1
-    if run.data.moves > MOVES then
-        return SEM.Runner.fail(run, why .. "; no clear field found at " .. MOVES .. " other sites either")
-    end
-    -- Map, safehouse and base modes name one spot: asking again gives the same one, and would burn every move at once
-    if not SEM.Targets.RANDOM_MODES[o.locationMode] then return SEM.Runner.fail(run, why .. "; the location mode has no other site") end
-    local pos, err = SEM.Targets.resolve(o, nil, run.anchor)
-    if not pos then return SEM.Runner.fail(run, why .. "; no other site: " .. tostring(err)) end
-    if pos.x == run.x and pos.y == run.y then return SEM.Runner.fail(run, why .. "; the new site was the same spot") end
-    print("[SEM] run " .. run.id .. " crash moved to " .. pos.x .. "," .. pos.y .. ": " .. why)
-    run.x, run.y = pos.x, pos.y
-    SEM.Runner.markerAt(run, pos.x, pos.y)
-    SEM.Runner.status(run, "No clear field at the site, the crash moved (" .. run.data.moves .. " of " .. MOVES .. ")")
-    Spawn.defer(run, run.x, run.y, function() place(run, o) end)
-end
-
 -- the footprint radius of the aircraft o asks for (the largest of its scripts)
 local function footprint(o)
     local r = 0
@@ -260,7 +373,7 @@ local function footprint(o)
     return r
 end
 
--- true when the whole search box around (x,y) may not be loaded yet: a corner is missing and no player is near
+-- true when the whole box round (x,y) may not be loaded yet: a corner is missing and no player is near
 function Crash.waitLoad(x, y, R, cell, playerNear)
     for _, c in ipairs({ { -1, -1 }, { 1, -1 }, { -1, 1 }, { 1, 1 } }) do
         if not cell:getGridSquare(x + c[1] * R, y + c[2] * R, 0) then return not playerNear(x, y, NEAR) end
@@ -268,16 +381,30 @@ function Crash.waitLoad(x, y, R, cell, playerNear)
     return false
 end
 
+-- half the collision body's longest side, in tiles, rounded up: extents (vehicles_sem_crash.txt) x vehicle scale / 2, the
+-- heading unknown so the longest side counts: heli 10.0 x 0.8 / 2 = 4, plane 19.5 x 0.45 / 2 = 4.4 -> 5
+Crash.BODY = { helicopter = 4, plane = 5 }
+
+-- up to 3 guard points round the wreck (play test 3: guards on the wreck square were trapped in its collision box; test 4:
+-- the footprint ring was too far out). Each sits body + 1 + the spread radius from the wreck's centre, so even the
+-- spread's inner edge is 1 tile off the body.
+function Crash.guardPoints(cx, cy, body) return Spawn.ringPoints(cx, cy, body + 1 + Spawn.GUARD_RING_RADIUS, 3) end
+
 place = function(run, o)
-    -- Spawn.defer fires when the centre loads; findClear counts unloaded squares as blocked, so a half-loaded box would move
-    -- the crash away. Wait for the corners too: four getGridSquare calls a second while waiting.
-    if Crash.waitLoad(run.x, run.y, SEARCH + footprint(o), getCell(), Spawn.playerNear) then
+    -- Spawn.defer fires when the centre loads; findClear counts unloaded squares as blocked, so a half-loaded circle would
+    -- push the wreck to its edge. Wait for the circle's box (and the footprint) too: four getGridSquare calls a second.
+    local mx, my, rad = searchCircle(run)
+    if Crash.waitLoad(mx, my, rad + footprint(o), getCell(), Spawn.playerNear) then
         return Spawn.defer(run, run.x, run.y, function() place(run, o) end)
     end
     local known = SEM.Events.convoy.knownVehicles()
     local plane, r = placeAircraft(run, o, known)
-    if not plane then return relocate(run, o, r) end
+    if not plane then
+        SEM.Targets.strikeSite(run.data and run.data.site)
+        return SEM.Runner.fail(run, r)
+    end
     local cx, cy = plane:getX(), plane:getY()
+    SEM.Targets.learnSite(cx, cy, r, o.aircraft)
     -- everything round the wreck ignores the location class: the aircraft's field already passed field(), whatever its
     -- class (a field in a forest or town zone would refuse every car, scorch mark, crate and fire); protection still holds
     local co = {}
@@ -311,12 +438,13 @@ place = function(run, o)
     local what = "Crash site: " .. made .. " wreck(s), " .. debris .. " burnt squares, " .. #seeds .. " fire(s)"
     local done = false
     run.data.placing = true
-    Spawn.siteGuards(run, o, { plane }, function(guards, kind, sprinters)
+    local ring = Crash.guardPoints(cx, cy, Crash.BODY[o.aircraft] or Crash.BODY.plane)
+    Spawn.siteGuards(run, o, #ring > 0 and ring or { plane }, function(guards, kind, sprinters)
         done = true
         run.data.placing = nil
         SEM.Runner.status(run, what .. ", " .. guards .. (kind ~= "" and " " .. kind or "") .. " guard(s)"
             .. (sprinters > 0 and ", " .. sprinters .. " sprinters" or ""))
-    end)
+    end, nil, #ring > 0 and Spawn.GUARD_RING_RADIUS or nil)
     if not done then SEM.Runner.status(run, what .. ", spawning guards") end
 end
 
@@ -347,11 +475,11 @@ end
 function Crash.stop(run, why)
     SEM.Events.wildfire.stop(run)
     local notes = {}
-    local n = run.data and run.data.wrecks or 0
+    local n = run.options and run.options.cleanUp == true and 0 or run.data and run.data.wrecks or 0 -- Clean Up has dealt with them
     if n > 0 then notes[#notes + 1] = n .. " wreck(s) stay in the world" end
     if run.data and run.data.ground then
         run.data.ground = nil
-        notes[#notes + 1] = "loot left on the ground stays"
+        if not (run.options and run.options.cleanUp == true) then notes[#notes + 1] = "loot left on the ground stays" end -- Clean Up removed it
     end
     if #notes == 0 then return nil end
     return table.concat(notes, "; ")

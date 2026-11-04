@@ -254,8 +254,51 @@ function P:initialise()
         self.tips[#self.tips + 1] = b
         self.tipOff[#self.tips] = t[1] - ncw
     end
+    -- "set all" strip under the headers: boxes sit on the panel, so buildRows never destroys them
+    if self.kind.cols then
+        self.allBtn = T.btn("Set all", self.rx + 4, 0, 70, self, P.onSetAll)
+        self:addChild(self.allBtn)
+        self.allBoxes = {}
+        for i, w in ipairs({ 44, 40, 40 }) do
+            local e = ISTextEntryBox:new("", 0, 0, w, self.m.bh)
+            e.font = T.font.small
+            e:initialise()
+            e:instantiate()
+            self:addChild(e)
+            e:setTextRGBA(T.c.amber.r, T.c.amber.g, T.c.amber.b, 1)
+            T.input(e, false)
+            self.allBoxes[i] = e
+        end
+        local tip = SEM.Form.helpButton("Type a value and press Set all to copy it to every row. Leave a box empty to keep that column.", self.rx + 78, 0)
+        self:addChild(tip)
+        self.allTip = tip
+    end
     T.grip(self, MINW, MINH)
     self:layout()
+end
+
+-- copies the filled boxes to every row; same ranges as Options.lootTable; changes nothing when any value is bad
+function P:onSetAll()
+    local v = {}
+    for i, e in ipairs(self.allBoxes) do
+        local t = e:getText():gsub("%s", "")
+        if t ~= "" then
+            v[i] = tonumber(t)
+            if not v[i] then self:say("Set all: numbers only.", true); return end
+        end
+    end
+    for i = 1, 3 do if v[i] and v[i] ~= v[i] then self:say("Set all: numbers only.", true); return end end -- NaN passes every range test
+    if (v[1] and (v[1] < 0 or v[1] > 100)) or (v[2] and (v[2] < 0 or v[2] % 1 ~= 0)) or (v[3] and (v[3] < 0 or v[3] > 100 or v[3] % 1 ~= 0)) then
+        self:say("Chance is 0 to 100; Min and Max are whole numbers, Max at most 100.", true); return
+    end
+    for _, r in ipairs(self.rows) do
+        if (v[2] or tonumber(r.min) or 0) > (v[3] or tonumber(r.max) or 0) then self:say("Min cannot be above Max.", true); return end
+    end
+    for _, r in ipairs(self.rows) do
+        r.chance, r.min, r.max = v[1] or r.chance, v[2] or r.min, v[3] or r.max
+    end
+    self.rebuild = true
+    self:say("")
 end
 
 -- every y position and column x, from the current size and font
@@ -272,6 +315,7 @@ function P:metrics()
     m.listH = m.addY - 10 - m.listY
     m.colY = m.top + math.max(22, tip + 4)
     m.viewY = m.colY + math.max(18, fh + 4)
+    if self.kind.cols then m.allY = m.viewY; m.viewY = m.allY + bh + 4 end
     m.viewH = m.by - 16 - m.viewY
     self.m = m
     self.lw = math.floor((w - 36) / 2)
@@ -291,6 +335,12 @@ function P:layout()
     for _, b in ipairs({ self.applyBtn, self.cancelBtn }) do b:setY(m.by) end
     local ncw = self.rw - 188
     for i, b in ipairs(self.tips) do b:setX(self.rx + ncw + self.tipOff[i]) end
+    if self.allBoxes then
+        local ncw2 = self.rw - 188
+        for i, x in ipairs({ 8, 56, 100 }) do self.allBoxes[i]:setX(self.rx + ncw2 + x); self.allBoxes[i]:setY(m.allY) end
+        self.allBtn:setY(m.allY)
+        self.allTip:setY(m.allY + 2)
+    end
     if self.view then
         self.view:setX(self.rx); self.view:setY(m.viewY); self.view:setWidth(self.rw); self.view:setHeight(m.viewH)
     end
@@ -308,7 +358,7 @@ function P:add(it)
     local k = self.kind
     if k.single then self.rows = {}
     elseif #self.rows >= k.max then self:say("At most " .. k.max .. " " .. k.noun .. ".", true); return end
-    self.rows[#self.rows + 1] = k.cols and { item = it.id, chance = 100, min = 1, max = 1 } or { item = it.id }
+    self.rows[#self.rows + 1] = k.cols and { item = it.id, chance = 30, min = 1, max = 1 } or { item = it.id }
     self.rebuild, self.toBottom = true, true
     self:say("")
 end

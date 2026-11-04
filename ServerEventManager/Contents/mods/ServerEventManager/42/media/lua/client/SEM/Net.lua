@@ -3,10 +3,10 @@ if isServer() then return end
 require "SEM/Config"
 require "SEM/Fmt"
 
-local Net = { snapshot = nil, recvMs = 0, lines = {} }
+local Net = { snapshot = nil, recvMs = 0, log = {}, logSeq = 0 } -- log: the Logs pane, oldest first (Fmt.logInsert); logSeq: newest server entry number held
 SEM.Net = Net
 
-local MAX_LINES = 30
+local MAX_LOG = 2000 -- ponytail: same ceiling as the server's saved log (Runner LOG_MAX)
 
 function Net.send(command, args)
     sendClientCommand(getPlayer(), SEM.Config.MODULE, command, args or {})
@@ -23,10 +23,17 @@ function Net.request(command, args)
     return nextReq
 end
 
--- newest first; bad lines draw red
+-- a client-side notice for the Logs pane (no entry number); bad lines draw red
 function Net.line(text, bad)
-    table.insert(Net.lines, 1, { text = tostring(text), bad = bad })
-    while #Net.lines > MAX_LINES do table.remove(Net.lines) end
+    SEM.Fmt.logInsert(Net.log, { at = os.time(), text = tostring(text), bad = bad }, MAX_LOG)
+end
+
+-- one entry from the server; asks for what is missing when its number skips ahead
+function Net.logEntry(e, inBatch)
+    if type(e) ~= "table" or type(e.n) ~= "number" or type(e.at) ~= "number" then return end
+    if not inBatch and e.n > Net.logSeq + 1 then Net.send("getLog", { since = Net.logSeq }) end
+    SEM.Fmt.logInsert(Net.log, e, MAX_LOG)
+    if e.n > Net.logSeq then Net.logSeq = e.n end
 end
 
 -- server clock advanced by time since the snapshot arrived; second value false when it is the client clock
@@ -66,6 +73,7 @@ function on.snapshot(args)
     if type(args) ~= "table" then return end
     Net.snapshot = args
     Net.recvMs = getTimestampMs()
+    if not Net.logAsked then Net.logAsked = true; Net.send("getLog", { since = Net.logSeq }) end -- first snapshot: load the log
     console("onSnapshot", args.ack)
 end
 
@@ -94,6 +102,21 @@ function on.configExportPart(args)
     if type(args) == "table" then cfgWin("onPart", args.i, args.n, args.text) end
 end
 function on.configError(args) cfgWin("onError", type(args) == "table" and args.text or nil) end
+
+-- a getLog reply: entries oldest first; asks again while more waits. top below ours = the server's world was reset
+function on.logBatch(args)
+    args = type(args) == "table" and args or {}
+    if type(args.top) == "number" and args.top < Net.logSeq then
+        Net.log, Net.logSeq = {}, 0
+        return Net.send("getLog", { since = 0 })
+    end
+    for _, e in ipairs(args.entries or {}) do Net.logEntry(e, true) end
+    if args.more then Net.send("getLog", { since = Net.logSeq }) end
+end
+
+function on.logAdd(args)
+    if type(args) == "table" then Net.logEntry(args.e) end
+end
 
 function on.notice(args)
     args = type(args) == "table" and args or {}

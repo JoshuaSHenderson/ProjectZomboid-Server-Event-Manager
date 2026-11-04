@@ -3,7 +3,7 @@
 Project Zomboid Build 42 mod for multiplayer servers. It gives server admins an in-game console to set up,
 force, schedule and cancel server events: airdrops, hostile camps, migrating hordes, wildfires, super zombies, convoy
 wrecks, sieges, manhunts, rescue calls and aircraft crashes. Players get on-screen alerts, a sound and map markers. Mod id
-`ServerEventManager`, author JoshuaSHenderson, version 0.3.2-beta.
+`ServerEventManager`, author JoshuaSHenderson, version 0.4.0-beta.
 
 > **Beta, under active development. Expect bugs.** If you hit one, please
 > [open an issue](https://github.com/JoshuaSHenderson/ProjectZomboid-Server-Event-Manager/issues) with what you did and your `console.txt`.
@@ -123,8 +123,9 @@ and no schedules.
 
 Every event shares these option groups:
 
-- **Announcement:** Title (60 characters), Warning Message and Start Message (200 each), Lead Minutes (0 to 60, default 5),
-  Sound On, Require Radio.
+- **Announcement:** Title (60 characters), Show Warning Before Event (default off), Warning Message and Lead Minutes (0 to 60,
+  default 0), shown only when the warning is on, then Start Message (200 each), Sound On, Require Radio. With the warning off
+  no warning is sent and the event starts at once. Under Siege keeps it on (5 minutes) so players can get home.
 - **Map marker:** Marker On, Marker Exact, Exact With Radio, Fuzzy Radius (10 to 500 tiles, default 100). Exact pins the spot
   with a small blinking marker. Otherwise players see a circle of the fuzzy radius that contains the site off-centre. Exact With
   Radio (default off) shows players carrying a charged radio or walkie-talkie the exact spot instead of the circle; the client
@@ -133,6 +134,7 @@ Every event shares these option groups:
   Player, Minimum Character Age in Days (0 to 3650, default 0) for Near Random Player. Avoid Forest shows for Town, Countryside
   and the two near-player modes. Migrating Horde, Under Siege and Hunted have no location options; they pick their own site.
 - **General:** Duration Minutes (1 to 240). When it runs out the event ends and cleans up.
+- **Clean Up At End** (every event, default off): when the event ends it removes what it spawned: crates, ground loot, zombies, undriven vehicles near their spawn, A-Life NPCs and their camp scene. Ground not loaded is cleaned when it next loads, for up to 2 hours.
 - **Extra Per Player (Percent)** (0 to 200, default 0) on every event with a count: each online player beyond the first adds
   this percent to the event's counts, rounded down (50 with 3 players turns 10 into 20). NPC counts still stop at 10 and zombies
   at the zombie limit. Wildfire has none; on Airdrop, Convoy Wreck and Aircraft Crash it sits with the guards.
@@ -145,7 +147,7 @@ Every event shares these option groups:
 A crate drops at the site and a helicopter is heard once it lands.
 
 - **Crate:** Crate Count (1 to 5, spread around the first), loot (see [Loot](#loot)), Smoke, Flyover Sound (needs Sound
-  On; plays for 10 seconds once the crates are down, stops on Cancel), Remove When Empty.
+  On; plays for 10 seconds once the crates are down, stops on Cancel), Flyover Volume (percent, default 30; 0 turns it off), Remove When Empty.
 - **Guards:** see [Guards](#guards).
 - Ends when every crate is empty ("all loot taken") or time runs out. Empty crates are removed if Remove When Empty is
   on. Any crate is removed at the end only when no player is within 25 tiles. On Cancel the same 25-tile rule decides,
@@ -221,9 +223,9 @@ its player pick ignores Minimum Character Age.
   loud explosion plays once for every player as it goes active (Sound On; Require Radio applies). The aircraft lands only in a
   clear field: grass or dirt with no trees, buildings, roads, water or solid objects under its whole footprint (the plane needs
   a much bigger one). It waits until the ground within 40 tiles of the site is loaded (or a player is near) before it looks.
-  When that ground has none, the crash moves to a new site, and the marker with it, up to 5 times, then fails. Only Town,
-  Countryside and the two near-player modes can move; Map and the safehouse and Jeem base modes fail at once. There is no
-  stand-in wreck. If no loot fits around the aircraft the run fails and no fire starts. It ends when every item is picked
+  The marker never moves once it is on the map: the wreck lands inside the circle players see. If no clear field is free,
+  the crash knocks down trees to make one. An exact marker may shift up to 15 tiles onto the wreck. There is no
+  stand-in wreck. Use Site List (default on): in the random location modes the crash goes to a known clear field from a built-in list of 400 (plus fields earlier crashes proved), nearest to where the mode aims, never near the last 10 used; off picks any random spot. If no loot fits around the aircraft the run fails and no fire starts. It ends when every item is picked
   up or at the time limit; what is left stays on the ground. Location Mode defaults to
   Countryside.
 - **Wreck:** Aircraft (Random, Helicopter or Plane; default Random), Burnt Cars (0 to 6 extra burnt cars around the
@@ -235,7 +237,7 @@ its player pick ignores Minimum Character Age.
 
 ### Under Siege
 
-Waves attack a player's safehouse or Jeem base, one at a time. NPC waves (need A-Life) use A-Life's raid mode, so they fight
+Waves attack a player's safehouse or Jeem base, one at a time, each from 2 to 4 sides at once. NPC waves (need A-Life) use A-Life's raid mode, so they fight
 the players there and may force entry. Zombie waves need no A-Life; they spawn and are steered toward the base like a
 Migrating Horde.
 
@@ -341,7 +343,7 @@ in a crate, Convoy Wreck in its vehicles, Aircraft Crash on the ground around th
 
 - **Loot Pack:** one or more packs from the Loot Packs page fill the crate, or Random pack.
 - The picker opens from the Loot Packs page. Search by name, filter by category, double-click to add. Each row has a chance in
-  percent (0 to 100) and a count range (Min to Max, Max at most 100). Up to 100 rows.
+  percent (0 to 100) and a count range (Min to Max, Max at most 100). Up to 100 rows. **Set all** copies a typed Chance, Min or Max to every row; an empty box leaves that column alone. New rows start at 30 percent chance.
 - A crate is never empty: if the rolls give nothing, one item is added. Unknown item ids are skipped and named in the
   Logs. A list with no valid item at all falls back to the Medium tier.
 
@@ -388,12 +390,20 @@ Every player sees a small **Server Events** bar: incoming events with a countdow
 minutes. It names titles only, never a location. The button folds it, dragging moves it, and it remembers both. Event markers
 show on the world map and the minimap; hover one to see what it is. Once Arrow When Left or fewer zombies or NPCs of an event remain
 (default 3, 0 for off), players within Arrow Range (default 150 tiles) get an on-screen arrow to the nearest, with the count and distance. Camp, Horde, Super Zombies,
-Under Siege, Stranger and Hunted have it. The bar lists at most 5 events.
+Under Siege, Stranger and Hunted have it. The bar lists at most 5 events. Map markers are coloured by kind: hostile bases (Hostile Camp, Under Siege, Hunted) red, Migrating Horde and Super Zombies green, Aircraft Crash blue, Airdrop and Convoy gold, Wildfire orange, Stranger teal. A mod's event can set `color`.
 
 While an event runs, a flat down arrow marks what it spawned: red on hostile NPCs, green on friendly ones, always shown, and red on
-zombies within 40 tiles and in sight. Each carries
+zombies within 40 tiles and in sight. **Mark Hostiles** (events with hostiles; on by default) off hides these marks. Each carries
 `modData.SEMType`: `HostileZombie`, `HostileNpc` or `FriendlyNpc`. The server sets it when it spawns them, and each client sets its own
 copy when it sees them, because modData does not sync. Require Radio hides an event from both for players without a radio.
+
+## Default setup
+
+On a brand-new server (no saved Server Event Manager config), the first load creates a starter setup so events begin without any configuring. Servers that already have a config never get it, and it is made only once.
+
+It adds six enabled Random Game Time schedules named `Default: <Event>`: Airdrop, Aircraft Crash, Stranger Calls For Help, Convoy Wreck, Migrating Horde and Super Zombies. Each runs its own preset (`Default Starter <Event>`), so the event pages stay at their normal defaults. Waits are 9 to 15 game days per schedule, six schedules, so roughly one event every 2 game days (about 2 real hours at the default day length); the first runs start a few game hours in, 2 game days apart. Guards are zombies (no A-Life needed), counts are small, Clean Up At End, notifications and markers are on, Require Radio is off, Duration is 30 minutes, Extra Per Player is 10 percent, and the global limits are untouched. Wildfire, Under Siege, Hunted and Hostile Camp get no schedule.
+
+Home shows a banner until an admin presses Got it, and admins see a line in the Logs pane when they log in. To change it, edit the schedules in Scheduler and the presets in Options. To turn it off, select the `Default:` schedules in Scheduler and disable or delete them. Reset to Default on the Scheduler page (after a confirmation) deletes every schedule and rebuilds the starter set; running events are not stopped, and your own presets are kept.
 
 ## Scheduler
 
@@ -468,6 +478,7 @@ unpaused.
 - **phunsprinters2:** super zombie speed may be overwritten by it, or reset when the game re-rolls a zombie's speed. Not
   yet checked on a real mod list. The server log prints `super speed readback` to help.
 - **Bandits:** not supported. There is no integration.
+- **Viewpoint** (A-Life Stance Dots Viewpoint): with it loaded, hostile marks show in Viewpoint's first and third person views; without it they hide there. The direction arrows hide in those views.
 - **A-Life and Jeem Extension:** optional, see [Requirements](#requirements). All calls into them are in one file and are
   guarded, so a change in either mod falls back to zombies and a warning in the Logs instead of an error.
 
@@ -484,9 +495,9 @@ unpaused.
   empty areas are untested. Keep Require Player Near on.
 - **Fire:** scans and sweeps cover floors 0 to 3. A fire only on floor 4 or higher is not seen. Fire spread rate over a
   long run is unmeasured.
-- **Camp cleanup:** A-Life NPCs and their camp scene belong to A-Life and cannot be removed by this mod. After a Cancel or
+- **Camp cleanup:** A-Life NPCs and their camp scene belong to A-Life and cannot be removed by this mod unless Clean Up At End is on. After a Cancel or
   the time limit they stay, and the Logs say how many. Fallback zombies, Horde zombies and super zombies also stay.
-  Crates and wrecked vehicles are the only things the mod removes or leaves as plain world objects, with a convoy's
+  Without Clean Up At End, crates and wrecked vehicles are the only things the mod removes or leaves as plain world objects, with a convoy's
   vehicle loot and a crash's ground loot, which stay.
 - **Camp group tracking** relies on A-Life events `ProjectALife_NpcSpawned` and `ProjectALife_NpcDied` that have not been
   seen firing on a server. Deaths while the server is down are missed.
@@ -496,8 +507,8 @@ unpaused.
   Horde targets; Extra Per Player (Percent); random guard minimums and maximums; NPC Difficulty (it stays only if play proves
   the effect); Exact With Radio; local time beside the server time; Copy; field visibility; Home and the walkthrough; the
   Import / Export page and its loading fix; click sounds; `SEM.registerEvent` for other mods.
-- **Aircraft Crash:** the models draw on a test client, but their final size and look, the clear-field search and the moves to
-  a new site are unproven in play. The plane's grey screen beside it is not proven fixed. Placing a site can log
+- **Aircraft Crash:** the models draw on a test client, but their final size and look, the clear-field search and the tree
+  clearing are unproven in play. The plane's grey screen beside it is not proven fixed. Placing a site can log
   `AddItemToMap` packet parse errors on the client, likely from the scorch marks; the cause is unproven.
 - **Radio marker:** a marker gated by Require Radio stays on the minimap until the map is reopened after the radio is lost.
 - **Singleplayer is not supported.**

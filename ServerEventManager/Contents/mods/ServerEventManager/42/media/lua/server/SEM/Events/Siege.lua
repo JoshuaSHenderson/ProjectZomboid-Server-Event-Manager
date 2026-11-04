@@ -33,14 +33,38 @@ function Siege.candidates(bases, target, chosen)
     return out
 end
 
--- an outdoor loaded square about dist tiles from the base, tried all around it; Spawn.suits keeps it off protected ground
-function Siege.waveSquare(x, y, dist)
-    for try = 1, 40 do
-        local a, d = math.rad(ZombRand(360)), dist + try -- further out each try, past a big base's own zone
-        local sq = getCell():getGridSquare(math.floor(x + math.cos(a) * d), math.floor(y + math.sin(a) * d), 0)
-        if sq and Spawn.suits(sq) then return sq end
-    end
+-- Pure, specs in tests/run.lua. n angles (degrees) round the base: evenly spaced from a random start, each jittered a quarter
+-- gap either way. rand(m) gives 0..m-1.
+function Siege.spreadAngles(n, rand)
+    local gap = 360 / n
+    local start, jit, out = rand(360), math.floor(gap / 4), {}
+    for i = 1, n do out[i] = start + (i - 1) * gap + (rand(2 * jit + 1) - jit) end
+    return out
 end
+
+-- Pure. total split over k groups as evenly as it goes, never a zero group (k shrinks to total)
+function Siege.split(total, k)
+    k = math.max(1, math.min(k, total))
+    local out = {}
+    for i = 1, k do out[i] = math.floor(total / k) + (i <= total % k and 1 or 0) end
+    return out
+end
+
+-- up to n outdoor loaded squares about dist tiles from the base, one per direction round it; Spawn.suits keeps them off
+-- protected ground. A direction with no loaded square is skipped, so the list may be shorter (or empty)
+function Siege.waveSquares(x, y, dist, n)
+    local out = {}
+    for _, deg in ipairs(Siege.spreadAngles(n, ZombRand)) do
+        for try = 1, 15 do
+            local a, d = math.rad(deg + ZombRand(21) - 10), dist + try -- further out each try, past a big base's own zone
+            local sq = getCell():getGridSquare(math.floor(x + math.cos(a) * d), math.floor(y + math.sin(a) * d), 0)
+            if sq and Spawn.suits(sq) then out[#out + 1] = sq; break end
+        end
+    end
+    return out
+end
+
+function Siege.waveSquare(x, y, dist) return Siege.waveSquares(x, y, dist, 1)[1] end
 
 -- the wave being waited for or fought, for the bar
 local function barWave(run)
@@ -79,30 +103,53 @@ end
 
 local function sendWave(run, o, player)
     local d = run.data
-    local sq = Siege.waveSquare(run.x, run.y, o.spawnDistance)
-    if not sq then
+    local zom = d.waveType == "zombies"
+    local k = zom and 3 or o.attackers < 3 and 1 or math.min(o.attackers, 4) -- D5: groups, each from its own side
+    local sqs = Siege.waveSquares(run.x, run.y, o.spawnDistance, k)
+    if #sqs == 0 then
         SEM.Runner.status(run, d.base .. ": no clear ground for wave " .. (d.wave + 1) .. " yet, trying again")
         d.at = run.elapsed + 10
         return
     end
-    if d.waveType == "zombies" then
+    if zom then
         d.wave = d.wave + 1
-        Horde.state[run.id] = Horde.newState(sq:getX(), sq:getY(), Spawn.clamp(o.zombieAttackers), PULSE.pulseInterval)
+        local want = Spawn.clamp(o.zombieAttackers)
+        d.waveWant, d.spawned, d.spawnLeft = want, 0, want -- saved so a restart keeps the wave's size and progress
+        local st = Horde.newState(sqs[1]:getX(), sqs[1]:getY(), want, PULSE.pulseInterval)
+        st.pts = {} -- Siege.step rotates the batches through these
+        for i, sq in ipairs(sqs) do st.pts[i] = { x = sq:getX(), y = sq:getY() } end
+        d.wavePts = {} -- saved: after a restart the rest of the wave spawns at these points, not at the base
+        for i, p in ipairs(st.pts) do d.wavePts[i] = { x = p.x, y = p.y } end
+        Horde.state[run.id] = st
         run.placed = true
         return enter(run, "attacking")
     end
-    local made, why = SEM.Compat_ALife.spawnRaid(player, sq:getX(), sq:getY(), 0, o.attackers, o.npcTier, run.x, run.y, o.npcDifficulty, Spawn.weaponPack(o, run))
+    local made, why, pts, pack = 0, nil, {}, Spawn.weaponPack(o, run)
+    -- the claim window opens before the first spawn, so an NPC that appears at once is claimed; want is corrected after the loop
+    local prevWant, prevUids, prevDead = d.want, d.uids, d.dead
+    d.uids, d.dead, d.want = d.uids or {}, d.dead or {}, (d.want or 0) + o.attackers
+    d.claimPts, d.claimX, d.claimY, d.claimUntil = {}, sqs[1]:getX(), sqs[1]:getY(), SEM.Runner.clock() + C.CAMP_CLAIM
+    for i, sq in ipairs(sqs) do d.claimPts[i] = { x = sq:getX(), y = sq:getY() } end
+    Camp.hookALife()
+    for i, n in ipairs(Siege.split(o.attackers, #sqs)) do
+        local m, w = SEM.Compat_ALife.spawnRaid(player, sqs[i]:getX(), sqs[i]:getY(), 0, n, o.npcTier, run.x, run.y, o.npcDifficulty, pack)
+        if m > 0 then
+            made, pts[#pts + 1] = made + m, { x = sqs[i]:getX(), y = sqs[i]:getY() }
+        else
+            why = w
+        end
+    end
+    if made > 0 and #pts < #sqs then SEM.Runner.warn(run, "wave " .. (d.wave + 1) .. ": only " .. #pts .. " of " .. #sqs .. " groups spawned: " .. tostring(why)) end
     if made == 0 then
+        d.want, d.uids, d.dead = prevWant, prevUids, prevDead
         d.failed = (d.failed or 0) + 1
         if d.failed >= 3 and not run.placed then return SEM.Runner.fail(run, "A-Life refused the attackers: " .. tostring(why)) end
         SEM.Runner.warn(run, "wave " .. (d.wave + 1) .. " failed: " .. tostring(why))
         d.at = run.elapsed + 60
         return
     end
-    d.wave, d.want = d.wave + 1, (d.want or 0) + made
-    d.uids, d.dead = d.uids or {}, d.dead or {}
-    d.claimX, d.claimY, d.claimUntil = sq:getX(), sq:getY(), SEM.Runner.clock() + C.CAMP_CLAIM
-    Camp.hookALife()
+    d.wave, d.want = d.wave + 1, (prevWant or 0) + made
+    d.claimPts, d.claimX, d.claimY = pts, pts[1].x, pts[1].y -- the groups that spawned; claimX/Y: older code reads them
     run.placed = true
     enter(run, "attacking")
 end
@@ -112,9 +159,14 @@ local function waveState(run)
     local st = Horde.state[run.id]
     if st or run.data.waveType ~= "zombies" then return st end
     local refs = Spawn.ledgerRefs(run)
-    if not (refs and refs[1]) then return nil end
+    local d = run.data
+    local left = type(d.spawnLeft) == "number" and d.spawnLeft or math.max(0, (d.waveWant or 0) - (d.spawned or 0))
+    if not (refs and refs[1]) and not (d.waveWant and left > 0) then return nil end
+    refs = refs or {}
     st = Horde.newState(run.x, run.y, 0, PULSE.pulseInterval)
-    st.refs, st.spawned, st.want = refs, #refs, #refs
+    st.refs, st.spawned, st.want = refs, run.data.spawned or #refs, run.data.waveWant or #refs
+    st.left = left
+    if type(d.wavePts) == "table" and #d.wavePts > 0 then st.pts = d.wavePts end
     Horde.state[run.id] = st
     return st
 end
@@ -138,12 +190,14 @@ end
 local function overrun(run)
     local o, d = run.options, run.data
     local zom = d.waveType == "zombies"
-    local sq = Siege.waveSquare(run.x, run.y, o.spawnDistance)
-    if sq and zom then
-        -- a stand-in run: failing this one below does not drop its batches; standIn leaves them untagged, as nothing untags -run.id
-        Spawn.guards({ id = -run.id, standIn = true }, sq, o.zombieAttackers, C.SIEGE_RADIUS, 0, nil, nil, nil, nil, true)
-    elseif sq then
-        SEM.Compat_ALife.spawnRaid(Spawn.nearestPlayer(run.x, run.y), sq:getX(), sq:getY(), 0, o.attackers, o.npcTier, run.x, run.y, o.npcDifficulty, Spawn.weaponPack(o))
+    local sqs = Siege.waveSquares(run.x, run.y, o.spawnDistance, 3)
+    for i, n in ipairs(#sqs > 0 and Siege.split(zom and Spawn.clamp(o.zombieAttackers) or o.attackers, #sqs) or {}) do
+        if zom then
+            -- a stand-in run: failing this one below does not drop its batches; standIn leaves them untagged, as nothing untags -run.id
+            Spawn.guards({ id = -run.id, standIn = true }, sqs[i], n, C.SIEGE_RADIUS, 0, nil, nil, nil, nil, true)
+        else
+            SEM.Compat_ALife.spawnRaid(Spawn.nearestPlayer(run.x, run.y), sqs[i]:getX(), sqs[i]:getY(), 0, n, o.npcTier, run.x, run.y, o.npcDifficulty, Spawn.weaponPack(o))
+        end
     end
     if o.takeover then
         SEM.Takeover.add({ baseId = d.baseId or d.base, label = d.base, x = run.x, y = run.y, rect = d.rect, runId = run.id,
@@ -245,7 +299,12 @@ end
 
 -- one spawn batch and steering sound of a zombie wave, from Horde's OnTick
 function Siege.step(run)
-    Horde.advance(run, Horde.state[run.id], PULSE, function() return run.x, run.y end)
+    local st = Horde.state[run.id]
+    if st and st.pts and st.left > 0 then
+        st.pi = (st.pi or 0) % #st.pts + 1 -- each batch from the next side
+        st.sx, st.sy = st.pts[st.pi].x, st.pts[st.pi].y
+    end
+    Horde.advance(run, st, PULSE, function() return run.x, run.y end)
 end
 
 -- only while attacking: a beaten zombie wave's state stays for the status line, and points (even none) in regroup or incoming

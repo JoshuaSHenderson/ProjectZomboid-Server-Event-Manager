@@ -27,7 +27,27 @@ local function hearing()
     return radioYes
 end
 
-local function project(x, y, z)
+-- D6: Viewpoint's 3D camera needs its own projection. View.next() names the view a keypress would switch to; "first" means 3D is off.
+-- The pixels come from the ALifeStanceDotsViewpoint bridge when it is loaded; without it the marks hide, as isometric maths would misplace them.
+local METRES_PER_UNIT = 1.75 -- same height convention as ALifeStanceDotsViewpoint: iso 1.15 is about 2 m
+local function in3D()
+    local view = Viewpoint and Viewpoint.View
+    if view == nil then return false end
+    local ok, nextView = pcall(view.next)
+    return ok and nextView ~= nil and nextView ~= "first"
+end
+
+-- screen x, y of a point height tiles above (x, y, z); nil when hidden (behind the 3D camera, or no bridge)
+local function project(x, y, z, height, three)
+    height = height or 0
+    if three then
+        local bridge = ALifeStanceDotsViewpoint
+        if bridge == nil or bridge.pixel == nil then return nil end
+        local ok, seen = pcall(bridge.pixel, x, y, z, height * METRES_PER_UNIT)
+        if not (ok and seen) then return nil end
+        return bridge.pixelX(), bridge.pixelY()
+    end
+    z = z + height
     local zoom = getCore():getZoom(0)
     if not zoom or zoom <= 0 then zoom = 1 end
     return (IsoUtils.XToScreen(x, y, z, 0) - getCameraOffX()) / zoom, (IsoUtils.YToScreen(x, y, z, 0) - getCameraOffY()) / zoom
@@ -39,7 +59,7 @@ local function arrow(i)
 end
 
 -- SEMType reaches the client here, since modData does not sync: each spawned zombie or NPC in the cell gets it set on first sight
-local function drawTags(px, py, pz)
+local function drawTags(px, py, pz, three)
     if SEM.empty(tagged) then return end
     local list = getCell():getZombieList()
     for i = 0, list:size() - 1 do
@@ -57,8 +77,8 @@ local function drawTags(px, py, pz)
             end
             local tex = show and mark(NPC[kind] or "kill")
             if tex then
-                local sx, sy = project(x, y, zz + HEAD)
-                UIManager.DrawTexture(tex, sx - KILL_SIZE / 2, sy - KILL_SIZE, KILL_SIZE, KILL_SIZE, 0.95)
+                local sx, sy = project(x, y, zz, HEAD, three)
+                if sx then UIManager.DrawTexture(tex, sx - KILL_SIZE / 2, sy - KILL_SIZE, KILL_SIZE, KILL_SIZE, 0.95) end
             end
         end
     end
@@ -79,8 +99,9 @@ local function render()
     local map = ISWorldMap_instance
     if map and map:isVisible() then return end
     local px, py, pz = player:getX(), player:getY(), player:getZ()
-    drawTags(px, py, pz)
-    if #runs == 0 then return end
+    local three = in3D() -- once per frame: it asks Viewpoint each time
+    drawTags(px, py, pz, three)
+    if #runs == 0 or three then return end -- the ring's maths is isometric
     local cx, cy = project(px, py, pz)
     local tm = getTextManager()
     for _, r in ipairs(runs) do

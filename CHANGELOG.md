@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.4.0-beta
+
+Built from the 2026-11-03 live-server bug list and four play tests on the test server.
+
+### Added
+
+- Show Warning Before Event (every event, default off): a checkbox in Announcement. Off sends no warning and the event starts at once; on shows the Warning Message and Lead Minutes (now between the warning and start messages). Lead Minutes now defaults to 0. Under Siege keeps its warning on (5 minutes) so players can get home and see its base marker. Saves, presets and schedules that already had Lead Minutes above 0 switch to Show Warning on, so existing servers behave the same. The default setup's events have it off.
+- Default setup: a brand-new server starts with six safe events already scheduled (Airdrop, Aircraft Crash, Stranger Calls For Help, Convoy Wreck, Migrating Horde, Super Zombies), about one every 2 game days, so things happen without setup. Home shows a banner (a dark panel with an amber bar, the six events as a list and a Got it button), admins get a line when they log in, and the Logs pane records it. Servers that already have a saved config get nothing.
+- Aircraft Crash: Use Site List (default on). Random, near-player and countryside crashes pick a known clear field from a built-in list of 400 sites (planes need the big ones), widening the search up to 1500 tiles when none is in range; sites where a crash fits are remembered and reused, and a site that fails twice is skipped.
+- Clean Up At End (every event, off by default): when the event ends it removes what it spawned: crates (even with loot left),
+  its ground loot, its zombies, its undriven vehicles near where they spawned, its A-Life NPCs and camp scene. Ground that is
+  not loaded is cleaned when it next loads, for up to 2 hours.
+- Mark Hostiles (events with hostiles, on by default): off hides the marks over the event's zombies and NPCs.
+- Flyover Volume (Airdrop, default 30 percent): how loud the helicopter flyover is; 0 turns it off.
+- Loot tables: Set all copies a Chance, Min or Max to every row; new rows start at 30 percent chance.
+- Map markers are coloured by event kind: hostile bases (Hostile Camp, Under Siege, Hunted) red, Migrating Horde and Super
+  Zombies green, Aircraft Crash blue, Airdrop and Convoy gold, Wildfire orange, Stranger teal. Mod events can set `color`.
+
+### Fixed
+
+- An event nobody returns to now ends at its time limit; before, a paused event never timed out and kept its slot.
+- Two event zombies sharing a persistent id are both counted until both are killed, so an event no longer ends while one lives.
+  A zombie without a persistent id is logged once.
+- After a restart, a Migrating Horde or Under Siege zombie wave that had not finished spawning spawns the rest, and one that
+  had given up (no room) does not try again. A siege wave shows its real size after a restart.
+- An event whose zombies the game never loaded or removed without a kill now ends: once a player has stood within 30 tiles of
+  the site for 90 seconds with none of them loaded, they count as gone.
+- Stranger Calls For Help completes when only the stranger is left. If no zombie could spawn it ends as a success without the
+  reward; Hostile Camp and Super Zombies also end as a success instead of failing.
+- A timed-out event ends at its time limit even on a paused empty server.
+- Under Siege waves come from 2 to 4 sides at once instead of one spot.
+- Aircraft Crash and Convoy no longer move their marker once it is on the map: the wreck or cars land inside the circle players
+  see, and a crash knocks down trees if no clear field is free. An exact marker may shift up to 15 tiles onto the wreck.
+- Raiders spawned by events no longer cost A-Life reputation when attacked or killed before they react (A-Life counted idle or
+  unarmed raiders as surrendered).
+- Hostile marks show correctly in Viewpoint's first and third person views when A-Life Stance Dots Viewpoint is loaded, and hide
+  in those views otherwise; the direction arrows hide there.
+- Map circles keep the size set for them at every zoom.
+- Guards spawned for an event are only ever spawned once per event, logged with their count and place.
+
 ## 0.3.2-beta
 
 ### Fixed

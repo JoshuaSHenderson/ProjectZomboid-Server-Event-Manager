@@ -18,13 +18,23 @@ local function withDefault(opts, key, value)
     return opts
 end
 
+-- Under Siege keeps its warning on: players need time to get home, and its base marker shows during the warning
+local function siegeWarning(opts)
+    for _, f in ipairs(opts) do
+        if f.key == "showWarning" then f.default = true; f.help = f.help .. " Under Siege defaults to on: players need time to get home, and the base marker shows during the warning." end
+        if f.key == "leadMinutes" then f.default = 5 end
+    end
+    return opts
+end
+
 local function shared(title, message, startMessage, duration)
     return {
         { key = "notifyOn", type = "bool", default = true, group = "Announcement", help = "Shows the on-screen notifications for this event: the warning, the start and any later notices. Off runs it quietly; the map marker and the Server Events bar still follow their own settings." },
         { key = "title", type = "string", default = title, maxLen = 60, group = "Announcement", help = "Headline shown to players on both notifications. Keep it short." },
-        { key = "message", type = "string", default = message, maxLen = 200, group = "Announcement", showIf = { key = "notifyOn", equals = true }, help = "First notification: the warning that something is coming, sent when the event is announced. The minutes left are added for you. Not sent when Lead Minutes is 0." },
-        { key = "startMessage", type = "string", default = startMessage, maxLen = 200, group = "Announcement", showIf = { key = "notifyOn", equals = true }, help = "Second notification, sent the moment the event starts." },
-        { key = "leadMinutes", type = "int", min = 0, max = 60, default = 5, group = "Announcement", help = "Warning before the event starts, in minutes. The location is picked and shown on the map only when this ends." },
+        { key = "showWarning", type = "bool", default = false, group = "Announcement", showIf = { key = "notifyOn", equals = true }, help = "On sends a warning notification first and starts the event after Lead Minutes. Off sends no warning and the event starts at once." },
+        { key = "message", type = "string", default = message, maxLen = 200, group = "Announcement", showIf = { key = "showWarning", equals = true }, help = "First notification: the warning that something is coming, sent when the event is announced. The minutes left are added for you." },
+        { key = "leadMinutes", type = "int", min = 0, max = 60, default = 0, group = "Announcement", showIf = { key = "showWarning", equals = true }, help = "Warning before the event starts, in minutes. The location is picked and shown on the map only when this ends." },
+        { key = "startMessage", type = "string", default = startMessage, maxLen = 200, group = "Announcement", showIf = { key = "notifyOn", equals = true }, help = "Notification sent the moment the event starts." },
         { key = "soundOn", type = "bool", default = true, group = "Announcement", help = "Plays an alert sound with each notification." },
         { key = "requireRadio", type = "bool", default = false, group = "Announcement", help = "Only players carrying a radio or walkie-talkie with a charged battery get the notifications and the map marker. It does not have to be switched on. Bags count." },
         { key = "markerOn", type = "bool", default = true, group = "Map marker", help = "Shows a marker on the map for this event." },
@@ -40,6 +50,7 @@ local function shared(title, message, startMessage, duration)
         minAge("Location", { key = "locationMode", equals = "nearRandomPlayer" }),
         { key = "avoidForest", type = "bool", default = true, group = "Location", showIf = { key = "locationMode", any = { "town", "countryside", "nearRandomPlayer", "nearChosenPlayer" } }, help = "Rejects spots in forest or deep forest. Keep on so events do not land where nobody can reach them." },
         { key = "durationMinutes", type = "int", min = 1, max = 240, default = duration, group = "General", help = "How long the event stays active before it is cleaned up, in minutes. 30 is typical." },
+        { key = "cleanUp", type = "bool", default = false, group = "General", help = "When the event ends or is cancelled, removes what it spawned: crates (full or not), loot on the ground, its zombies, its vehicles nobody is in, and its A-Life NPCs. Anything in ground that is not loaded is removed when a player loads it, for up to 2 hours. Off leaves it all for players." },
     }
 end
 
@@ -79,6 +90,10 @@ local function lootFields(group, showIf)
     }
 end
 
+local function markField(group)
+    return { key = "markHostiles", type = "bool", default = true, group = group, help = "Shows the red and green marks over this event's zombies and NPCs. Off hides them for everyone." }
+end
+
 local function guards(group)
     local npc = { key = "guardType", any = { "npc", "random" } }
     local zom = { key = "guardType", any = { "zombies", "random" } }
@@ -97,6 +112,7 @@ local function guards(group)
         guardLeash(group, npc, 5),
         npcDifficulty(group, npc),
         extraPct(group, { key = "guardType", any = { "zombies", "npc", "random" } }),
+        markField(group),
     }
 end
 
@@ -138,6 +154,7 @@ local EventDefs = {
         }), lootFields("Crate")), {
             { key = "smoke", type = "bool", default = true, group = "Crate", help = "Adds a smoke plume so players can spot the site from far away." },
             { key = "flyoverSound", type = "bool", default = true, group = "Crate", help = "Plays a helicopter flyover for 10 seconds once the crates have landed. Needs Sound On. Airdrop only." },
+            { key = "flyoverVolume", type = "int", min = 0, max = 100, default = 30, group = "Crate", showIf = { key = "flyoverSound", equals = true }, help = "How loud the helicopter flyover is, 0 to 100 percent. 0 turns it off. Airdrop only." },
             { key = "removeWhenEmpty", type = "bool", default = true, group = "Crate", help = "Deletes the crate once all items are taken, keeping the map tidy." },
         }), guards("Guards")),
     },
@@ -155,6 +172,7 @@ local EventDefs = {
         }), lootFields("Loot", { key = "lootCrate", equals = true })), {
             arrowField("Group"),
             arrowRange("Group"),
+            markField("Group"),
             { key = "fallbackCount", type = "int", min = 0, max = 500, default = 10, group = "Fallback", help = "Raider zombies spawned around the crate when survivors cannot be created. 0 means no camp without A-Life. Capped by the zombie limit." },
             { key = "fallbackOutfit", type = "string", picker = "outfit", default = "", maxLen = 60, group = "Fallback", help = "Outfit those substitute zombies wear. Empty uses the Bandit outfit." },
         }),
@@ -173,6 +191,7 @@ local EventDefs = {
             { key = "requirePlayerNear", type = "bool", default = true, group = "Target", help = "On: the run fails if no player is within 200 tiles of the target when it starts. Off: it runs anyway, but the horde may stall far from anyone." },
             arrowField("Horde"),
             arrowRange("Horde"),
+            markField("Horde"),
             { key = "pulseInterval", type = "int", min = 5, max = 120, default = 15, group = "Pulse", help = "Seconds between nudges that pull the horde toward its target. 15 is steady." },
             { key = "pulseRadius", type = "int", min = 10, max = 100, default = 40, group = "Pulse", help = "How wide each nudge reaches, in tiles. 40 keeps the horde on track." },
         }),
@@ -199,6 +218,7 @@ local EventDefs = {
             { key = "markZombies", type = "bool", default = true, group = "Zombies", help = "Gives super zombies toxic green skin, and the boss red skin, each with a floating tag so players can tell them apart. Off leaves them looking like any other zombie." },
             arrowField("Zombies"),
             arrowRange("Zombies"),
+            markField("Zombies"),
             { key = "boss", type = "bool", default = false, group = "Boss", help = "Makes one of them a boss with much more health. It counts toward Count." },
             { key = "bossHp", type = "float", min = 1, max = 50, default = 10, group = "Boss", showIf = { key = "boss", equals = true }, help = "Boss health multiplier. 10 is a long fight; keep modest for small groups." },
             { key = "followMarker", type = "bool", default = true, group = "Map marker", help = "Moves the map marker along with the zombies as they travel." },
@@ -214,7 +234,7 @@ local EventDefs = {
     },
     {
         id = "siege", title = "Under Siege",
-        options = add(without(shared("Under Siege", "Armed groups have been seen moving toward a player base.", "Your base is under attack!", 30),
+        options = add(without(siegeWarning(shared("Under Siege", "Armed groups have been seen moving toward a player base.", "Your base is under attack!", 30)),
             { locationMode = true, location = true, town = true, chosenPlayer = true, minAgeDays = true, avoidForest = true }), {
             { key = "siegeTarget", type = "enum", noRandom = true, choices = { "random", "randomSafehouse", "randomJeemBase", "chosenBase" }, default = "random", group = "Target", help = "Which base is attacked. Random picks a safehouse or Jeem base. Random choices only pick bases with a player near, so nobody loses a base while away." },
             { key = "siegeBase", type = "string", picker = "base", default = "", maxLen = 60, group = "Target", showIf = { key = "siegeTarget", equals = "chosenBase" }, help = "The base to attack, from the bases that exist now. The first wave waits until a player is near it." },
@@ -231,6 +251,7 @@ local EventDefs = {
             extraPct("Attackers"),
             arrowField("Attackers"),
             arrowRange("Attackers"),
+            markField("Attackers"),
             { key = "spawnDistance", type = "int", min = 25, max = 60, default = 40, group = "Attackers", help = "How far from the base each wave starts, in tiles, then it marches in. 40 gives defenders time to get ready." },
             { key = "returnMinutes", type = "int", min = 1, max = 60, default = 5, group = "Defence", help = "Minutes players have to be at the base. The clock starts with the siege and again at each wave's warning. If nobody came within 100 tiles of the base by then, the wave attacks anyway and the siege fails." },
             { key = "takeover", type = "bool", default = true, group = "Defence", help = "When nobody defended the base: its loot is destroyed, fires start, and the enemies occupy it, all when a player next loads the base. This is the one thing that ignores safehouse protection." },
@@ -249,6 +270,7 @@ local EventDefs = {
             { key = "rewardRange", type = "int", min = 5, max = 200, default = 40, group = "Rescue", help = "Only players this many tiles from the stranger or closer when the wave falls get the bonus, and they see the reputation notice." },
             arrowField("Rescue"),
             arrowRange("Rescue"),
+            markField("Rescue"),
             { key = "protectSeconds", type = "int", min = 0, max = 300, default = 60, group = "Rescue", help = "Seconds the stranger cannot be hurt, counted from when the zombies appear, so players have time to arrive. 0 gives no protection." },
         }),
     },
@@ -268,6 +290,7 @@ local EventDefs = {
             extraPct("Hunters"),
             arrowField("Hunters"),
             arrowRange("Hunters"),
+            markField("Hunters"),
             { key = "slowHunters", type = "bool", default = true, group = "Hunters", help = "Hunters walk where they would run, so a player can get away for a while but never lose them." },
             { key = "spawnDistance", type = "int", min = 30, max = 100, default = 60, group = "Hunters", help = "How far from the player the hunters start, in tiles, and how far away they come back." },
             { key = "returnMin", type = "int", min = 1, max = 60, default = 2, group = "Hunters", help = "A player over 100 tiles from every hunter got away for now. Fewest minutes before the hunters left come back near them." },
@@ -279,6 +302,7 @@ local EventDefs = {
         options = add(add(add(withDefault(shared("Aircraft Crash", "Something has gone down nearby.", "A crash site is burning.", 30), "locationMode", "countryside"), { -- fields are rare in towns
             { key = "aircraft", type = "enum", choices = { "helicopter", "plane" }, default = "random", group = "Wreck", labels = { helicopter = "Helicopter", plane = "Plane" },
               help = "What came down. Helicopter is a burnt-out helicopter; Plane is a broken-up airliner, about 21 m across. It lands only in a clear field: grass or dirt with no trees, buildings, roads or water under it. When none is near the site, the crash moves to a new site, up to 5 times, then fails. The plane needs a much bigger field." },
+            { key = "useSiteList", type = "bool", default = true, group = "Wreck", help = "On: picks a known clear field from the built-in list (plus fields earlier crashes proved), nearest to where the location mode aims. Off: any random spot, as the location mode picks it. Fixed locations (map spot, town) ignore this." },
             { key = "wreckPieces", type = "int", min = 0, max = 6, default = 0, group = "Wreck", help = "Burnt cars left around the aircraft as extra wreckage. 0 means the aircraft alone." },
             { key = "fireSeeds", type = "int", min = 0, max = 8, default = 3, group = "Fire", help = "Fires started around the wreck, never on the loot and never on safehouse or Jeem base ground. 0 means no fire." },
             { key = "burnMinutes", type = "int", min = 1, max = 30, default = 5, group = "Fire", help = "Minutes the fires burn before every one is put out. The wreck stays either way." },
@@ -304,6 +328,16 @@ for _, d in ipairs(EventDefs) do
     EventDefs.byId[d.id] = d
 end
 
+-- D9: map marker colour per kind of event, r g b 0..1; a registered event may set def.color instead
+EventDefs.colors = {
+    camp = { 0.9, 0.15, 0.15 }, siege = { 0.9, 0.15, 0.15 }, hunted = { 0.9, 0.15, 0.15 },
+    horde = { 0.4, 0.8, 0.2 }, super = { 0.4, 0.8, 0.2 },
+    crash = { 0.2, 0.55, 1.0 },
+    airdrop = { 1.0, 0.8, 0.1 }, convoy = { 1.0, 0.8, 0.1 },
+    wildfire = { 1.0, 0.45, 0.05},
+    stranger = { 0.2, 0.9, 0.8 },
+}
+
 -- D55: what a mod needs to build its options: the Announcement, Map marker, Location and General options every built-in has, then
 -- extra (a list of option fields); drop is a set of keys to leave out, like { locationMode = true }
 function SEM.sharedOptions(title, message, startMessage, duration, extra, drop)
@@ -321,6 +355,13 @@ local function why(d)
     if EventDefs.byId[d.id] then return "id is already taken" end
     if type(d.title) ~= "string" or d.title == "" then return "title must be text" end
     if type(d.options) ~= "table" or #d.options == 0 then return "options must be a list of option fields" end
+    if d.color ~= nil then
+        if type(d.color) ~= "table" then return "color must be { r, g, b }, each 0 to 1" end
+        for i = 1, 3 do
+            local c = d.color[i]
+            if type(c) ~= "number" or c < 0 or c > 1 then return "color must be { r, g, b }, each 0 to 1" end
+        end
+    end
     local seen = {}
     for i, f in ipairs(d.options) do
         local at = "option " .. i

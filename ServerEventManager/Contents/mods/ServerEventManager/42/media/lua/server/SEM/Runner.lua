@@ -21,7 +21,10 @@ local Runner = {}
 SEM.Runner = Runner
 
 local LIVE = { pending = true, warning = true, active = true, ending = true }
-local MAX_HISTORY = 50
+local MAX_HISTORY = 50 -- the event bar's recent list only; the Logs pane reads world.log
+local LOG_MAX = 2000 -- ponytail: ceiling on stored log entries (about 300 KB in the save); trimmed 200 at a time. Raise it or move to a file if admins need older.
+local LOG_TRIM = 200
+local LOG_BATCH = 300 -- most entries one getLog reply carries
 local FEED_EVERY = 60 -- real seconds between the bar's resends
 local MAX_STEP = 120 -- longest real gap, in seconds, that one update may count (a paused server adds nothing)
 
@@ -95,6 +98,39 @@ function Runner.pushSnapshot(sender, reqId)
     end
 end
 
+-- The Logs pane's record: every entry has a number (n, strictly rising), the server clock (at) and the run it belongs to. It is
+-- printed to the server console, saved with the world and pushed to admins as one logAdd (clients catch up with getLog).
+-- run may be nil (a line about no run).
+function Runner.log(run, text, bad)
+    local w = Store.world
+    if not w then return end
+    local n = (w.logSeq or 0) + 1
+    w.logSeq = n
+    local label = run and (run.schedule and run.schedule ~= "" and run.schedule ~= run.title and (run.schedule .. ": " .. tostring(run.title)) or tostring(run.title))
+    local e = { n = n, at = Runner.clock(), text = tostring(text), bad = bad or nil, run = run and run.id or nil, title = label }
+    w.log[#w.log + 1] = e
+    if #w.log > LOG_MAX + LOG_TRIM then
+        local keep = {}
+        for i = #w.log - LOG_MAX + 1, #w.log do keep[#keep + 1] = w.log[i] end
+        w.log = keep
+    end
+    print("[SEM] " .. (run and ("run " .. run.id .. " " .. label .. ": ") or "") .. e.text)
+    Runner.toAdmins("logAdd", { e = e })
+    return e
+end
+
+-- the entries after number `since`, oldest first, at most LOG_BATCH; more = true when the rest waits for another request
+function Runner.logSince(since)
+    local out, more = {}, false
+    for _, e in ipairs(Store.world and Store.world.log or {}) do
+        if e.n > since then
+            if #out >= LOG_BATCH then more = true; break end
+            out[#out + 1] = e
+        end
+    end
+    return out, more
+end
+
 -- what the event is doing right now, shown to admins in the feed and the server log. A text equal to the last one does
 -- nothing. A new one is always kept and logged, but the snapshot that carries it goes out at most once per
 -- Config.STATUS_PUSH real seconds (Runner.pollNow sends the one that was held back), and only when an admin is online.
@@ -108,7 +144,7 @@ function Runner.status(run, text)
     end
     if run.status == text then return end
     run.status = text
-    print("[SEM] run " .. run.id .. " " .. tostring(run.title) .. ": " .. text)
+    Runner.log(run, text)
     if not anyAdmin() then return end
     local since = Runner.clock() - lastPush
     if since >= 0 and since < C.STATUS_PUSH then
@@ -119,7 +155,7 @@ function Runner.status(run, text)
 end
 
 function Runner.warn(run, text)
-    Runner.toAdmins("notice", { text = tostring(run.title) .. ": " .. text, bad = true })
+    Runner.log(run, text, true)
 end
 
 local function record(run, state, reason)
@@ -128,6 +164,9 @@ local function record(run, state, reason)
     h[#h + 1] = { id = run.id, eventId = run.eventId, state = state, reason = reason, title = run.title, schedule = run.schedule, x = run.x, y = run.y,
         at = Runner.clock(), bar = not LIVE[state] and state ~= "skipped" and not run.refused, radio = run.options and run.options.requireRadio }
     while #h > MAX_HISTORY do table.remove(h, 1) end
+    local why = reason and (" - " .. tostring(reason)) or ""
+    Runner.log(run, string.upper(state) .. why,
+        state == "failed" or state == "cancelled")
 end
 
 -- what the players' event bar lists: titles and states only, never a site. left and age are seconds. status is the word shown
@@ -192,7 +231,6 @@ function Runner.logSkip(eventId, scheduleName, reason)
     local id = Store.world.nextRunId
     Store.world.nextRunId = id + 1
     record({ id = id, eventId = eventId, title = scheduleName, schedule = scheduleName }, "skipped", reason)
-    print("[SEM] schedule " .. tostring(scheduleName) .. " skipped: " .. tostring(reason))
     push()
 end
 
@@ -267,18 +305,23 @@ end
 -- returns a note to append to the end reason, or nil
 local function stopEvent(run, why)
     local mod = SEM.Events[run.eventId]
-    if not mod then return nil end
+    local clean
+    if run.options and run.options.cleanUp == true then -- before stop: stop clears the crate and ground lists
+        local okC, c = pcall(SEM.Spawn.cleanUp, run)
+        if okC then clean = c else Runner.log(run, "clean up error: " .. tostring(c), true); clean = "clean up error, see server log" end
+    end
+    if not mod then return clean end
     local ok, note = pcall(mod.stop, run, why)
     if not ok then
-        print("[SEM] stop error in run " .. run.id .. ": " .. tostring(note))
-        return "cleanup error, see server log"
+        Runner.log(run, "stop error: " .. tostring(note), true)
+        note = "cleanup error, see server log"
     end
-    return note
+    if clean and note then return clean .. "; " .. note end
+    return clean or note
 end
 
 function Runner.fail(run, reason)
     if not LIVE[run.state] then return end
-    print("[SEM] run " .. run.id .. " failed: " .. tostring(reason))
     stopEvent(run, "fail")
     setState(run, "failed", reason)
 end
@@ -308,6 +351,7 @@ function Runner.markerArgs(run)
     local m, def = run.marker, SEM.EventDefs.byId[run.eventId]
     local a = { id = run.id, x = m.x, y = m.y, radius = m.radius, exact = m.exact, title = run.options.title, radio = run.options.requireRadio,
         event = def and def.title, text = Runner.startText(run) }
+    a.color = def and (def.color or SEM.EventDefs.colors[def.id]) or nil -- D9: client falls back to orange
     if run.options.markerRadioExact then -- D53: the true spot, for clients that carry a radio
         local at = run.exact or run
         a.exactX, a.exactY = at.x, at.y
@@ -336,6 +380,14 @@ function Runner.exactDots()
         if r.exact and r.state == "active" then out[#out + 1] = { id = r.id, x = r.exact.x, y = r.exact.y } end
     end
     return out
+end
+
+-- the circle players see for a run: centre x, y and radius (D4: a site is placed inside it, so the circle never has to move).
+-- Without a marker there is no circle: the site and a nil radius.
+function Runner.circle(run)
+    local m = run.marker
+    if m then return m.x, m.y, m.exact and math.max(m.radius, C.CRASH_EXACT_SEARCH) or m.radius end
+    return run.x, run.y, nil
 end
 
 -- the crate lands up to 15 tiles from the planned target: an exact marker moves onto it; a fuzzy one that no longer
@@ -392,11 +444,12 @@ local function activate(run)
     local o = run.options
     local mod = SEM.Events[run.eventId]
     if not mod.ownSite then -- an event with ownSite (Horde) has no location options and sets run.x, run.y in start
-        local pos, why = SEM.Targets.resolve(o, mod.preferClass, run.anchor)
+        local pos, why = SEM.Targets.resolve(o, mod.preferClass, run.anchor, run)
         if not pos then return Runner.fail(run, why or "no target found") end
         run.x, run.y, run.z = pos.x, pos.y, pos.z
+        if pos.site then run.data = run.data or {} run.data.site = pos.site end -- Crash site list: placement strikes or learns it
         makeMarker(run)
-        print("[SEM] run " .. run.id .. " site " .. run.x .. "," .. run.y)
+        Runner.log(run, "site " .. run.x .. "," .. run.y)
     end
     local now = Runner.clock()
     run.startedAt, run.lastSeen, run.elapsed = now, now, 0
@@ -509,7 +562,7 @@ function Runner.begin(eventId, source, optionsOverride, scheduleName, forced)
     run.forced = forced or nil
     Store.world.runs[tostring(id)] = run
     record(run, "pending")
-    local lead = opts.leadMinutes
+    local lead = opts.showWarning == false and 0 or opts.leadMinutes -- (absent: a mod event from before showWarning keeps its lead)
     if lead > 0 then
         Runner.toAll("alert", { id = id, title = opts.title, sound = opts.soundOn,
             radio = opts.requireRadio, message = opts.message .. " Arrives in " .. lead .. " min." })
@@ -562,6 +615,7 @@ function Runner.away(run)
     if run.x then near = SEM.Spawn.playerNear(run.x, run.y, area) end
     for _, p in ipairs(points) do near = near or SEM.Spawn.playerNear(p.x, p.y, area) end
     if near then return false end
+    if type(run.data) == "table" then run.data.ghostSince = nil end -- the ghost clock only counts time spent watching
     Runner.status(run, "Paused, nobody near; waiting for a player to return")
     return true
 end
@@ -571,24 +625,33 @@ local function tickElapsed(run, now)
     run.lastSeen = now
 end
 
+-- ends an active run past its time limit; also called every second from pollNow, so a paused empty server ends it too
+local function timeUp(run)
+    if run.state == "active" and not SEM.Events[run.eventId].endless and run.elapsed >= run.options.durationMinutes * 60 then
+        local placing = run.data and run.data.placing
+        if run.placed and SEM.Events[run.eventId].timeUpFails then Runner.fail(run, "time up with enemies still standing")
+        elseif run.placed or placing then finish(run, placing and "time up while still spawning" or "time up")
+        else Runner.fail(run, "Nobody reached the site before it expired") end
+    end
+end
+
 local function update(only)
     if not Store.world then return end
     local now = Runner.clock()
     for _, run in ipairs(only or liveRuns()) do
         if run.state == "active" then tickElapsed(run, now) end
+        local ended = false
         if run.state == "active" and not Runner.away(run) then
             local ok, done = pcall(SEM.Events[run.eventId].update, run)
             if not ok then
                 Runner.fail(run, "update error: " .. tostring(done))
+                ended = true
             elseif done then
                 finish(run, tostring(done))
-            elseif run.state == "active" and not SEM.Events[run.eventId].endless and run.elapsed >= run.options.durationMinutes * 60 then -- an update may have failed it
-                local placing = run.data and run.data.placing
-                if run.placed and SEM.Events[run.eventId].timeUpFails then Runner.fail(run, "time up with enemies still standing")
-                elseif run.placed or placing then finish(run, placing and "time up while still spawning" or "time up")
-                else Runner.fail(run, "Nobody reached the site before it expired") end
+                ended = true
             end
         end
+        if not ended then timeUp(run) end -- the time limit holds while paused too; an update may have ended the run
     end
 end
 Runner.update = update
@@ -632,8 +695,11 @@ function Runner.pollNow()
     for _, run in ipairs(live) do
         if run.state == "warning" and now >= run.warnEnds then activate(run) end
         local mod = SEM.Events[run.eventId]
-        if run.state == "active" and mod.due then -- an event with a deadline in seconds (Siege) is stepped at once, not at the next minute
+        if run.state == "active" then
             tickElapsed(run, now)
+            timeUp(run)
+        end
+        if run.state == "active" and mod.due then -- an event with a deadline in seconds (Siege) is stepped at once, not at the next minute
             local ok, yes = pcall(mod.due, run)
             if not ok then Runner.fail(run, "update error: " .. tostring(yes))
             elseif yes then due[#due + 1] = run end
@@ -657,9 +723,11 @@ function Runner.init()
         elseif run.state == "pending" then
             Runner.fail(run, "interrupted by a restart")
         elseif run.state == "ending" then
-            setState(run, "ended", "finished during a restart")
+            local note = run.options and run.options.cleanUp == true and stopEvent(run, "end") -- the clean up the restart cut short
+            setState(run, "ended", note and ("finished during a restart - " .. note) or "finished during a restart")
         elseif run.state == "active" then
             run.lastSeen = Runner.clock()
+            if type(run.data) == "table" then run.data.ghostSince = nil end -- a stale clock would zero zombies not loaded yet
             if not run.placed then
                 local ok, err = pcall(SEM.Events[run.eventId].start, run)
                 if not ok then Runner.fail(run, "start error: " .. tostring(err)) end

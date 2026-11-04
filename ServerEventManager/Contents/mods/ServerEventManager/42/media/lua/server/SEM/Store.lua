@@ -5,6 +5,7 @@ require "SEM/Options"
 require "SEM/Schedule"
 require "SEM/Conditions"
 require "SEM/EventDefs"
+require "SEM/News"
 
 local C, O = SEM.Config, SEM.Options
 local Store = {}
@@ -243,12 +244,25 @@ function Store.migrate(cfg)
             o.guardNpcMin, o.guardNpcMax, o.guardMin, o.guardMax = o.guardMin, o.guardMax, nil, nil
         end)
     end
+    if from < 7 then -- Show Warning came in: a saved lead of minutes keeps its warning
+        each(function(o)
+            if type(o) == "table" and o.showWarning == nil and type(o.leadMinutes) == "number" and o.leadMinutes > 0 then o.showWarning = true end
+        end)
+    end
     if from < 5 then
         local keep = { location = true, random = true, randomTown = true, randomCountryside = true, randomPlayer = true }
         each(function(o, id)
             if type(o) == "table" and id == "horde" and o.targetType ~= nil and not keep[o.targetType] then o.targetType = "randomPlayer" end
         end)
     end
+end
+
+-- the marker a fresh install leaves: { at (ms), version, seen, started, ids }. Anything else is dropped.
+local function normDefaultSetup(d)
+    if type(d) ~= "table" or type(d.at) ~= "number" then return nil end
+    local ids = {}
+    for _, id in ipairs(tbl(d.ids)) do if type(id) == "string" then ids[#ids + 1] = id end end
+    return { at = d.at, version = type(d.version) == "string" and d.version or "", seen = d.seen == true, started = d.started == true, ids = ids }
 end
 
 local function normConfig(raw)
@@ -266,6 +280,7 @@ local function normConfig(raw)
     local cfg = { version = C.VERSION, schema = C.SCHEMA, limits = cleanFields(Store.limitsSchema, raw.limits), events = {}, presets = {},
         orphans = { events = {}, presets = {} },
         lootPacks = loot, vehiclePacks = packs, weaponPacks = arms, packsSeeded = true, weaponPacksSeeded = true,
+        defaultSetup = normDefaultSetup(raw.defaultSetup),
         schedules = normSchedules(raw.schedules), nextScheduleId = type(raw.nextScheduleId) == "number" and raw.nextScheduleId or 1 }
     for id in pairs(cfg.schedules) do -- never reissue an id that is in use
         local n = tonumber(id:match("^s(%d+)$"))
@@ -299,20 +314,79 @@ local function normConfig(raw)
     return cfg
 end
 
+-- one-time: a world saved before the Logs pane had its own log gets its old history as the first log entries
+local function migrateLog(w)
+    if #w.log > 0 or #w.history == 0 then return w end
+    for _, h in ipairs(w.history) do
+        if type(h) == "table" and type(h.at) == "number" then
+            w.logSeq = w.logSeq + 1
+            local why = h.reason and (" - " .. tostring(h.reason)) or ""
+            local label = h.schedule and h.schedule ~= "" and h.schedule ~= h.title and (h.schedule .. ": " .. tostring(h.title)) or h.title
+            w.log[#w.log + 1] = { n = w.logSeq, at = h.at, text = string.upper(tostring(h.state)) .. why, bad = (h.state == "failed" or h.state == "cancelled") or nil,
+                run = h.id, title = label }
+        end
+    end
+    return w
+end
+
 local function normWorld(raw)
     raw = tbl(raw)
-    return {
+    return migrateLog({
         nextRunId = type(raw.nextRunId) == "number" and raw.nextRunId or 1,
-        runs = tbl(raw.runs), history = tbl(raw.history), windows = tbl(raw.windows),
-        lastFired = tbl(raw.lastFired), nextGameHour = tbl(raw.nextGameHour), sweeps = tbl(raw.sweeps), queue = tbl(raw.queue),
+        runs = tbl(raw.runs), history = tbl(raw.history), log = tbl(raw.log), logSeq = type(raw.logSeq) == "number" and raw.logSeq or 0, windows = tbl(raw.windows),
+        lastFired = tbl(raw.lastFired), nextGameHour = tbl(raw.nextGameHour), sweeps = tbl(raw.sweeps), cleanups = tbl(raw.cleanups), queue = tbl(raw.queue),
         takeovers = tbl(raw.takeovers), takeoverFires = tbl(raw.takeoverFires), -- D49
-    }
+        learnedSites = tbl(raw.learnedSites), recentSites = tbl(raw.recentSites), siteStrikes = tbl(raw.siteStrikes), semGroups = tbl(raw.semGroups), -- Crash site list
+    })
+end
+
+-- A fresh install starts with these safe events armed (Random Game Time, one event about every 2 game days overall). Each runs a named
+-- preset, so the event pages stay untouched. Nothing destructive: no Wildfire, Under Siege, Hunted or Hostile Camp.
+-- Every one: guards are zombies (no A-Life needed), Clean Up At End, notifications and markers on, no radio needed.
+local STARTER = {
+    { "airdrop", { guardType = "zombies", guardCount = 6 } },
+    { "crash", { guardType = "zombies", guardCount = 6, useSiteList = true } },
+    { "stranger", { zombies = 10 } },
+    { "convoy", { guardType = "zombies", guardCount = 6 } },
+    { "horde", { size = 20 } },
+    { "super", { count = 3, boss = false } },
+}
+Store.STARTER = STARTER
+local STARTER_ALL = { showWarning = false, cleanUp = true, notifyOn = true, markerOn = true, requireRadio = false, extraPerPlayerPct = 10, durationMinutes = 30 }
+Store.STARTER_ALL = STARTER_ALL
+
+-- called by init on a fresh install and by Reset to Default with the live config (which then has no schedules). Returns the schedule names made.
+function Store.createDefaultSetup(cfg)
+    local names, ids = {}, {}
+    for _, row in ipairs(STARTER) do
+        local def = SEM.EventDefs.byId[row[1]]
+        if def and #names < Store.MAX_SCHEDULES and Store.presetCount() < Store.MAX_PRESETS then
+            local pick = {}
+            for k, v in pairs(STARTER_ALL) do pick[k] = v end
+            for k, v in pairs(row[2]) do pick[k] = v end
+            if pick.locationMode == nil and row[1] ~= "crash" then pick.locationMode = "random" end -- crash keeps its countryside default
+            local opts = cleanFields(def.options, pick)
+            local preset = "Default Starter " .. def.title
+            Store.savePreset(preset, def.id, opts)
+            local ok, entry = Store.validateEntry({ name = "Default: " .. def.title, eventId = def.id, preset = preset, enabled = true,
+                schedule = { mode = "randomGame", minDays = 9, maxDays = 15, firstDelayDays = 0, quietStart = 0, quietEnd = 0, windows = {} },
+                conditions = { minPlayers = 1, cooldownMinutes = 90 } })
+            if ok then
+                ids[#ids + 1] = Store.saveSchedule(nil, entry)
+                names[#names + 1] = entry.name
+            end
+        end
+    end
+    cfg.defaultSetup = { at = os.time() * 1000, version = SEM.News.version, seen = false, started = false, ids = ids }
+    return names
 end
 
 function Store.init()
     local rc = ModData.getOrCreate(C.CONFIG_KEY)
+    local fresh = SEM.empty(rc) -- no config was ever saved: a new server
     replace(rc, normConfig(rc))
     Store.config = rc
+    if fresh then Store.createDefaultSetup(rc) end
     local rw = ModData.getOrCreate(C.WORLD_KEY)
     replace(rw, normWorld(rw))
     Store.world = rw
@@ -341,7 +415,7 @@ end
 function Store.snapshot()
     local config = copy(Store.config)
     config.orphans = nil -- D55: not for the UI
-    return { serverOffsetMin = serverOffset(), config = config, runs = copy(Store.world.runs), history = copy(Store.world.history), queue = copy(Store.world.queue),
+    return { serverOffsetMin = serverOffset(), config = config, runs = copy(Store.world.runs), queue = copy(Store.world.queue),
         serverClock = serverClock(), bases = SEM.Targets and SEM.Targets.bases() or nil, gameDay = SEM.Scheduler and SEM.Scheduler.gameDay() }
 end
 

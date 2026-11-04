@@ -73,7 +73,8 @@ local CLEAR_MODES = { town = true, countryside = true, nearRandomPlayer = true, 
 
 -- Avoid Forest on real squares, once, when the site is loaded. Moves run.x,y (and the marker) to the nearest clear ring
 -- point; warns and stays when none within 60 tiles. At most 6 rings * 12 points * 49 samples lookups.
-function Spawn.clearSite(run, o)
+-- inside(x,y), optional: a shifted site must satisfy it (Convoy: stay inside the circle players see, D4)
+function Spawn.clearSite(run, o, inside)
     if not (o.avoidForest == true and CLEAR_MODES[o.locationMode]) or run.data.cleared then return end
     local here = Spawn.treeCover(run.x, run.y)
     if not here then return end
@@ -84,7 +85,7 @@ function Spawn.clearSite(run, o)
         for i = 0, 11 do
             local a = i * math.pi / 6
             local x, y = math.floor(run.x + math.cos(a) * ring + 0.5), math.floor(run.y + math.sin(a) * ring + 0.5)
-            local c = Spawn.treeCover(x, y)
+            local c = (not inside or inside(x, y)) and Spawn.treeCover(x, y)
             if c and c <= FOREST_COVER and c < best then bx, by, best = x, y, c end
         end
         if bx then
@@ -96,19 +97,28 @@ function Spawn.clearSite(run, o)
 end
 
 -- nearest loaded square to (x,y) on z 0 that suits a crate; o = event options for the zone check,
--- used = optional set of "x,y" keys to skip
-function Spawn.findSquare(x, y, radius, o, used)
+-- used = optional set of "x,y" keys to skip, inside = optional predicate(x,y) a square must also satisfy
+function Spawn.findSquare(x, y, radius, o, used, inside)
     local cell = getCell()
     for r = 0, radius do
         for dx = -r, r do
             for dy = -r, r do
                 if math.max(math.abs(dx), math.abs(dy)) == r then
                     local sq = cell:getGridSquare(x + dx, y + dy, 0)
-                    if suits(sq, o) and not (used and used[sq:getX() .. "," .. sq:getY()]) then return sq end
+                    if suits(sq, o) and not (used and used[sq:getX() .. "," .. sq:getY()])
+                        and (not inside or inside(sq:getX(), sq:getY())) then return sq end
                 end
             end
         end
     end
+end
+
+-- predicate(x,y): true inside the circle players see for the run; nil when it has none (no marker). D4: sites are placed
+-- inside it so it never moves.
+function Spawn.inCircle(run)
+    local mx, my, r = SEM.Runner.circle(run)
+    if not r then return nil end
+    return function(x, y) return (x - mx) ^ 2 + (y - my) ^ 2 <= r * r end
 end
 
 -- fill(container) runs before the object is sent, so clients get the loot with it
@@ -204,7 +214,7 @@ function Spawn.placeCrates(run, o, count, smoke, used)
             gone = gone or missing
             for _, item in ipairs(Spawn.fillLoot(box, rows, run)) do unknown[item] = true end
         end)
-        run.data.crates[#run.data.crates + 1] = { x = sq:getX(), y = sq:getY(), z = sq:getZ() }
+        run.data.crates[#run.data.crates + 1] = { x = sq:getX(), y = sq:getY(), z = 0 }
         if smoke then pcall(function() IsoFireManager.StartSmoke(getCell(), sq, true, 100, 500) end) end
     end
     if #sites < count then SEM.Runner.warn(run, "only " .. #sites .. " of " .. count .. " crates fit") end
@@ -248,7 +258,7 @@ function Spawn.scatterLoot(run, o, squares)
         if put and not seen[key] then
             seen[key] = true
             used[#used + 1] = sq
-            run.data.ground[#run.data.ground + 1] = { x = sq:getX(), y = sq:getY(), z = sq:getZ() }
+            run.data.ground[#run.data.ground + 1] = { x = sq:getX(), y = sq:getY(), z = 0 }
         end
     end
     return used
@@ -317,9 +327,16 @@ function Spawn.loadVehicles(run, o, cars)
     return n
 end
 
+-- marks an event vehicle for Clean Up: modData.semRunId on the car, its square in run.data.cars
+function Spawn.tagCar(run, car, sq)
+    pcall(function() car:getModData().semRunId = run.id end)
+    run.data.cars = run.data.cars or {}
+    run.data.cars[#run.data.cars + 1] = { x = sq:getX(), y = sq:getY(), z = 0 }
+end
+
 -- Removes the run's crates that are not wanted any more: empty ones (unless cancelled, and only when removeEmpty) and any
 -- with no player within CLEAN_RANGE. Returns a note when some are left behind, else nil.
-function Spawn.removeCrates(run, why, removeEmpty)
+function Spawn.removeCrates(run, why, removeEmpty, force)
     local left = 0
     for _, c in ipairs(run.data.crates or {}) do
         local sq = squareOf(c)
@@ -327,7 +344,7 @@ function Spawn.removeCrates(run, why, removeEmpty)
         if obj then
             local empty = obj:getContainer():isEmpty()
             local near = Spawn.playerNear(c.x, c.y, C.CLEAN_RANGE)
-            if (why ~= "cancel" and removeEmpty and empty) or not near then
+            if (why ~= "cancel" and removeEmpty and empty) or not near or force then
                 pcall(function() sq:stopFire(); sq:transmitStopFire() end)
                 sq:transmitRemoveItemFromSquare(obj)
             else
@@ -340,21 +357,23 @@ function Spawn.removeCrates(run, why, removeEmpty)
     run.data.crates = nil
     if left == 0 then return nil end
     local note = left .. " crate(s) left in place (players within " .. C.CLEAN_RANGE .. " tiles or area unloaded)"
-    print("[SEM] run " .. run.id .. ": " .. note)
+    SEM.Runner.log(run, note)
     return note
 end
 
 -- ref = { id = onlineID, z = zombie } as kept by events that track their zombies; ids are reused, so both must match. True only
 -- while that very object is loaded and alive: an unloaded zombie fails this too, so it never decides that one is dead.
 function Spawn.loaded(ref)
-    local ok, v = pcall(function() return ref.z:getOnlineID() == ref.id and not ref.z:isDead() end)
+    -- a culled or virtualised zombie's object can still answer its id, so it must also stand on a square
+    if not (ref and ref.z) then return false end -- unbound ledger ref: a failing pcall here costs a stack dump per survey in PZ
+    local ok, v = pcall(function() return ref.z:getOnlineID() == ref.id and not ref.z:isDead() and ref.z:getCurrentSquare() ~= nil end)
     return ok and v
 end
 
 -- ---- zombie ledger: an event's zombies outlive unloads, a paused server and restarts (Josh 2026-11-03) ----
 -- B42's population virtualizer keeps only a zombie's persistent outfit id (and a few flags) when it unloads; modData is lost
 -- (seen in the Blackout Predators mod, which binds its zombies the same way). So each event zombie is kept in its run's saved
--- data by that id: run.data.zs[pid] = true while alive, false once the game reports it killed (OnZombieDead). Unloading never
+-- data by that id: run.data.zs[pid] = how many living zombies carry it (old saves: true/false), run.data.zsKilled counts the killed (OnZombieDead). Unloading never
 -- counts as dying. A zombie the game removes without a death stays "alive" until the run's duration ends it.
 
 -- the id that names a zombie across reloads and restarts: getPersistentOutfitID with bit 15 (the hat-fallen flag) cleared, as
@@ -366,15 +385,28 @@ function Spawn.pidOf(z)
     return string.format("%d", raw)
 end
 
+-- a ledger value as a count of living zombies; the old version saved true (alive) and false (dead)
+local function count(v)
+    if v == true then return 1 end
+    return tonumber(v) or 0
+end
+
 -- puts a freshly spawned zombie's ref in its run's ledger; a stand-in run (already ended) keeps none
+local noPid = {}
 function Spawn.track(run, ref)
     ref.runId = run.id
     if run.standIn or not run.data then return end
     local pid = Spawn.pidOf(ref.z)
-    if not pid then return end
+    if not pid then
+        if not noPid[run.id] then
+            noPid[run.id] = true
+            SEM.Runner.log(run, "a zombie has no persistent id; it is only counted while loaded")
+        end
+        return
+    end
     ref.pid = pid
     run.data.zs = run.data.zs or {}
-    run.data.zs[pid] = true
+    run.data.zs[pid] = count(run.data.zs[pid]) + 1
 end
 
 local function ledgerOf(runId)
@@ -386,18 +418,19 @@ end
 -- alive for counting: a ledger zombie until it is killed, loaded or not; anything else (no persistent id) only while loaded
 function Spawn.alive(ref)
     local zs = ref.pid and ledgerOf(ref.runId)
-    if zs and zs[ref.pid] ~= nil then return zs[ref.pid] == true end
+    -- same-id zombies share a count, so it may over-count one while one of them lives, never end an event early
+    if zs and zs[ref.pid] ~= nil then return count(zs[ref.pid]) > 0 end
     return Spawn.loaded(ref)
 end
 
--- Pure. alive and total in a ledger
-function Spawn.ledgerCount(zs)
-    local alive, total = 0, 0
+-- Pure. alive and total in a ledger; killed = zombies killed so far (run.data.zsKilled), old false entries count as killed too
+function Spawn.ledgerCount(zs, killed)
+    local alive, dead = 0, killed or 0
     for _, v in pairs(zs or {}) do
-        total = total + 1
-        if v == true then alive = alive + 1 end
+        alive = alive + count(v)
+        if v == false then dead = dead + 1 end
     end
-    return alive, total
+    return alive, alive + dead
 end
 
 -- the refs of a run's living ledger zombies, not yet bound to a body (Spawn.rebind finds them), and the ledger's total; used
@@ -406,20 +439,28 @@ function Spawn.ledgerRefs(run)
     local zs = run.data and run.data.zs
     if not zs then return nil end
     local refs = {}
-    for pid, v in pairs(zs) do if v == true then refs[#refs + 1] = { pid = pid, runId = run.id } end end
+    for pid, v in pairs(zs) do
+        for _ = 1, count(v) do refs[#refs + 1] = { pid = pid, runId = run.id } end
+    end
     table.sort(refs, function(a, b) return a.pid < b.pid end)
-    local _, total = Spawn.ledgerCount(zs)
+    local _, total = Spawn.ledgerCount(zs, run.data.zsKilled)
     return refs, total
 end
 
--- the game reports a kill: the zombie's ledger entry, in whichever live run holds it, is marked dead
+local LIVE_STATES = { pending = true, warning = true, active = true, ending = true }
+
+-- the game reports a kill: one living zombie with that id, in the first live run that holds one, is taken off the ledger
 function Spawn.killed(z)
     local pid = Spawn.pidOf(z)
     local w = SEM.Store and SEM.Store.world
     if not (pid and w) then return end
     for _, run in pairs(w.runs) do
-        local zs = type(run) == "table" and type(run.data) == "table" and run.data.zs
-        if zs and zs[pid] == true then zs[pid] = false return end
+        local zs = type(run) == "table" and LIVE_STATES[run.state] and type(run.data) == "table" and run.data.zs
+        if zs and count(zs[pid]) > 0 then
+            zs[pid] = count(zs[pid]) - 1
+            run.data.zsKilled = (run.data.zsKilled or 0) + 1
+            return
+        end
     end
 end
 Spawn.hook("OnZombieDead", function(z) pcall(Spawn.killed, z) end)
@@ -434,8 +475,12 @@ function Spawn.rebind(refs)
     if lastRebind[key] and now - lastRebind[key] < 2000 then return end
     lastRebind[key] = now
     local need = {}
+    local bound = {} -- bodies already held by a loaded ref
     for _, r in ipairs(refs) do
-        if r.pid and Spawn.alive(r) and not Spawn.loaded(r) then need[r.pid] = r end
+        if r.pid and Spawn.alive(r) and not Spawn.loaded(r) then
+            need[r.pid] = need[r.pid] or {}
+            table.insert(need[r.pid], r)
+        elseif r.z then bound[r.z] = true end
     end
     if SEM.empty(need) then return end
     local ok, list = pcall(function() return getCell():getZombieList() end)
@@ -444,11 +489,14 @@ function Spawn.rebind(refs)
     for i = 0, list:size() - 1 do
         local z = list:get(i)
         local pid = Spawn.pidOf(z)
-        local r = pid and need[pid]
-        if r then
+        local q = pid and need[pid]
+        local r = q and q[1]
+        if r and not bound[z] then
             local okId, id = pcall(function() return not z:isDead() and z:getOnlineID() end)
             if okId and id then
-                r.z, r.id, need[pid] = z, id, nil
+                table.remove(q, 1)
+                bound[z] = true
+                r.z, r.id = z, id
                 local run = w and w.runs[tostring(r.runId)]
                 if run then Spawn.tag(run, z, id, r.kind or "HostileZombie") end
             end
@@ -464,13 +512,13 @@ local tags, npcs, tagsDirty, lastNpcs = {}, {}, false, "" -- zombies: online id 
 function Spawn.tag(run, z, id, kind)
     if tags[id] and tags[id].z == z then return end
     pcall(function() z:getModData().SEMType = kind end)
-    tags[id], tagsDirty = { id = id, z = z, runId = run.id, kind = kind }, true
+    tags[id], tagsDirty = { id = id, z = z, runId = run.id, kind = kind, show = not (run.options and run.options.markHostiles == false) }, true
 end
 
 -- kind: HostileNpc or FriendlyNpc. Kept by uid: an NPC's body comes and goes as it loads, so its id is looked up fresh each time
 function Spawn.tagNpc(run, uid, kind)
     if npcs[uid] then return end
-    npcs[uid], tagsDirty = { runId = run.id, kind = kind }, true
+    npcs[uid], tagsDirty = { runId = run.id, kind = kind, show = not (run.options and run.options.markHostiles == false) }, true
 end
 
 function Spawn.untagNpc(uid)
@@ -491,14 +539,14 @@ function Spawn.tagLists()
     local out = { HostileZombie = {}, HostileNpc = {}, FriendlyNpc = {} }
     for id, t in pairs(tags) do
         local l = out[t.kind]
-        l[#l + 1] = id
+        if t.show ~= false then l[#l + 1] = id end -- markHostiles off: still tagged, just not listed
     end
     for uid, t in pairs(npcs) do
         local shell = SEM.Compat_ALife.shellOf(uid)
         if shell then
             pcall(function() shell:getModData().SEMType = t.kind end)
             local l = out[t.kind]
-            l[#l + 1] = shell:getOnlineID()
+            if t.show ~= false then l[#l + 1] = shell:getOnlineID() end
         end
     end
     return out
@@ -529,11 +577,37 @@ function Spawn.refPoints(refs)
     return out
 end
 
+-- Ghosts: living ledger zombies the game removed without a death (culled, never loaded) would keep an event alive for ever. When
+-- a player has been within the event area for GHOST_SECS in a row and not one living zombie of the run has a loaded body, the
+-- area is loaded and the absence is real: those counts go to 0. The clock is run.data.ghostSince (saved, so a restart keeps it).
+local function ghostsGone(keep)
+    local first = keep[1]
+    local w = SEM.Store and SEM.Store.world
+    local run = first and w and w.runs[tostring(first.runId)]
+    local d = run and type(run.data) == "table" and run.data
+    if not (d and d.zs) then return false end
+    local okN, near = pcall(Spawn.playerNear, run.x or 0, run.y or 0, C.GHOST_RANGE)
+    near = okN and near and run.x ~= nil
+    for _, e in ipairs(keep) do if Spawn.loaded(e) then near = false end end
+    if not near then d.ghostSince = nil return false end
+    local now = SEM.Runner.clock()
+    d.ghostSince = d.ghostSince or now
+    if now - d.ghostSince < C.GHOST_SECS then return false end
+    for _, e in ipairs(keep) do if e.pid then d.zs[e.pid] = 0 end end
+    d.ghostSince = nil
+    SEM.Runner.log(run, #keep .. " zombies never loaded, counted gone")
+    return true
+end
+
 -- Shared survey for events that count zombies: rebinds, drops the killed, keeps the unloaded living. Returns the living count
 function Spawn.survey(refs)
     Spawn.rebind(refs)
     local keep = {}
     for _, e in ipairs(refs) do if Spawn.alive(e) then keep[#keep + 1] = e end end
+    if ghostsGone(keep) then
+        keep = {}
+        for _, e in ipairs(refs) do if Spawn.alive(e) then keep[#keep + 1] = e end end
+    end
     for i = #refs, 1, -1 do refs[i] = nil end
     for i, e in ipairs(keep) do refs[i] = e end
     return #keep
@@ -615,22 +689,28 @@ function Spawn.guards(run, square, count, radius, pct, outfit, refs, done, per, 
         return
     end
     jobs[#jobs + 1] = { run = run, x0 = square:getX(), y0 = square:getY(), count = count, radius = radius, pct = pct or 0,
-        outfit = outfit, refs = refs, per = per, done = done, unsafe = unsafe, spawned = 0, sprinters = 0, tries = count + 10 }
+        outfit = outfit, refs = refs, per = per, done = done, unsafe = unsafe, spawned = 0, made = 0, sprinters = 0, tries = count + 10,
+        started = SEM.Runner.clock() }
 end
 
--- one batch of a job; true when the job is over (all spawned, or the attempts ran out)
+-- one batch of a job; true when the job is over: everything made, or the tries ran out. A job that has made nothing keeps
+-- trying (a ring that is unloaded or protected may load later) until GHOST_SECS have passed since it started, so "nothing could
+-- spawn" is never decided in one tick. At most STEP_SAMPLES spots are tried per step. made = zombies the game created (bounds
+-- the loop, tracked or not); spawned = those that got a ref.
+local STEP_SAMPLES = 3
 local function stepJob(j)
-    local budget = C.HORDE_BATCH
-    while budget > 0 and j.spawned < j.count and j.tries > 0 do
-        j.tries = j.tries - 1
+    local budget, samples = C.HORDE_BATCH, 0
+    while budget > 0 and j.made < j.count and samples < STEP_SAMPLES and (j.tries > 0 or j.made == 0) do
+        j.tries, samples = j.tries - 1, samples + 1
         local a, d = math.rad(ZombRand(360)), 3 + ZombRand(math.max(1, j.radius - 2))
         local x, y = math.floor(j.x0 + math.cos(a) * d), math.floor(j.y0 + math.sin(a) * d)
         if getCell():getGridSquare(x, y, 0) and (j.unsafe or not Spawn.protected(x, y)) then
-            local n = math.min(5, j.count - j.spawned, budget)
+            local n = math.min(5, j.count - j.made, budget)
             local list = addZombiesInOutfit(x, y, 0, n, j.outfit, 50)
             if list then
                 for i = 0, list:size() - 1 do
                     local z = list:get(i)
+                    j.made = j.made + 1
                     if j.pct > 0 and Spawn.rollSprinter(j.pct, ZombRand) and pcall(function() z:doSprinter() end) then
                         j.sprinters = j.sprinters + 1
                     end
@@ -642,14 +722,16 @@ local function stepJob(j)
                         Spawn.track(j.run, ref) -- the run's ledger: counted alive until killed, through unloads and restarts
                         if j.refs then j.refs[#j.refs + 1] = ref end
                         if j.per then j.per(ref) end
+                        j.spawned = j.spawned + 1 -- only a zombie that got a ref counts: spawned > 0 means something is tracked
                     end
                 end
             end
-            j.spawned = j.spawned + (list and list:size() or 0) -- what the game made, not what was asked
             budget = budget - n
         end
     end
-    return j.spawned >= j.count or j.tries <= 0
+    if j.made >= j.count then return true end
+    if j.tries > 0 then return false end
+    return j.made > 0 or SEM.Runner.clock() - j.started >= C.GHOST_SECS
 end
 
 -- one step for every job; the OnTick hook below calls it every HORDE_BATCH_MS, specs call it directly
@@ -722,19 +804,53 @@ function Spawn.weaponPack(o, run)
     return full[ZombRand(#full) + 1]
 end
 
+-- Guards stood on the wreck itself were trapped inside its collision box (play test 3). Up to n loaded Spawn.suits squares
+-- round (cx,cy), one per direction, each at least inner tiles away (Chebyshev, so outside a square footprint of radius
+-- inner - 1) and, with avoid (a list of squares), at least clear tiles from each of those. The distance starts at inner and
+-- grows per try, so a diagonal or an unloaded direction still finds ground. May return fewer than n, or none.
+Spawn.GUARD_RING_RADIUS = 6 -- the spread round each point: A-Life rawSpawn clamps radius to >= 6 (ALifeDebugService), so no smaller works; a point must sit body + 1 + 6 out
+function Spawn.ringPoints(cx, cy, inner, n, avoid, clear)
+    local out, start = {}, ZombRand(360)
+    for i = 1, n do
+        local a = math.rad(start + (i - 1) * 360 / n)
+        for d = inner, inner + 14 do
+            local x, y = math.floor(cx + math.cos(a) * d), math.floor(cy + math.sin(a) * d)
+            local far = math.max(math.abs(x - cx), math.abs(y - cy)) >= inner
+            for _, c in ipairs(far and avoid or {}) do
+                if math.max(math.abs(x - c:getX()), math.abs(y - c:getY())) < clear then far = false; break end
+            end
+            local sq = far and getCell():getGridSquare(x, y, 0)
+            if sq and Spawn.suits(sq) then out[#out + 1] = sq; break end
+        end
+    end
+    return out
+end
+
 -- NPC guards fall back to zombies, npcCount * 2 of them, with a warning saying why. NPC guards are saved in run.data like a
 -- camp's group (Camp's hook claims them, which gives them their icons). refs, when given, collects the zombies as Spawn.guards does.
-function Spawn.siteGuards(run, o, sites, done, refs)
+-- radius, when given, is the spawn spread round each site (default: the leash for NPCs, o.guardRadius for zombies).
+function Spawn.siteGuards(run, o, sites, done, refs, radius)
     if o.guardType == "none" or #sites == 0 then return done(0, "", 0) end
+    if run.data.guardsMade then -- saved, so a restart holds too
+        SEM.Runner.log(run, "guards already made, not spawning them again")
+        return done(0, "", 0)
+    end
+    run.data.guardsMade = true
     local want = o.guardCount
     if o.guardType == "npc" then
-        local sq = sites[1]
-        local made, why = SEM.Compat_ALife.spawnGuards(nearestPlayer(sq:getX(), sq:getY()), sq:getX(), sq:getY(), sq:getZ(),
-            o.npcCount, o.npcTier, o.guardLeash, o.guardLeash, o.npcDifficulty, Spawn.weaponPack(o, run))
+        local sq, pack, made, why, at = sites[1], Spawn.weaponPack(o, run), 0, nil, {}
+        local k = math.max(1, math.min(#sites, o.npcCount)) -- the NPCs split over the sites, one A-Life group each, so they surround the wreck
+        for i = 1, k do
+            local s, n = sites[i], math.floor(o.npcCount / k) + (i <= o.npcCount % k and 1 or 0)
+            local m, w = SEM.Compat_ALife.spawnGuards(nearestPlayer(s:getX(), s:getY()), s:getX(), s:getY(), s:getZ(),
+                n, o.npcTier, radius or o.guardLeash, o.guardLeash, o.npcDifficulty, pack)
+            if m > 0 then made, at[#at + 1] = made + m, s:getX() .. "," .. s:getY() else why = w end
+        end
         if made > 0 then
             run.data.want, run.data.uids, run.data.dead = made, {}, {}
             run.data.claimX, run.data.claimY, run.data.claimUntil = sq:getX(), sq:getY(), SEM.Runner.clock() + C.CAMP_CLAIM
             SEM.Events.camp.hookALife() -- at call time: Camp requires Spawn
+            SEM.Runner.log(run, "guards spawned " .. made .. " (npc) at " .. table.concat(at, " "))
             return done(made, "Level " .. tostring(o.npcTier):sub(5) .. " NPC", 0)
         end
         SEM.Runner.warn(run, "NPC guards failed (" .. tostring(why) .. "), using zombies")
@@ -743,13 +859,182 @@ function Spawn.siteGuards(run, o, sites, done, refs)
     local left, guards, sprinters = Spawn.clamp(want), 0, 0
     local pct = o.guardType == "zombies" and o.guardSprinterPct or 0
     local function site(i)
-        if i > #sites then return done(guards, "zombie", sprinters) end
-        Spawn.guards(run, sites[i], math.ceil(left / (#sites - i + 1)), o.guardRadius, pct, nil, refs, function(made, sp)
+        if i > #sites then
+            local at = {}
+            for _, s in ipairs(sites) do at[#at + 1] = s:getX() .. "," .. s:getY() end
+            SEM.Runner.log(run, "guards spawned " .. guards .. " (zombie) at " .. table.concat(at, " "))
+            return done(guards, "zombie", sprinters)
+        end
+        Spawn.guards(run, sites[i], math.ceil(left / (#sites - i + 1)), radius or o.guardRadius, pct, nil, refs, function(made, sp)
             left, guards, sprinters = left - made, guards + made, sprinters + sp
             site(i + 1)
         end)
     end
     site(1)
+end
+
+-- ---- Clean Up (option cleanUp): removes what a run spawned when it ends ----
+
+local function removeGround(sq, runId)
+    local w, hit, n = sq:getWorldObjects(), {}, 0
+    for i = 0, w:size() - 1 do
+        local o = w:get(i)
+        local ok, id = pcall(function() return o:getItem():getModData().semRunId end)
+        if ok and id == runId then hit[#hit + 1] = o end
+    end
+    for _, o in ipairs(hit) do
+        if pcall(function() sq:transmitRemoveItemFromSquare(o) end) then n = n + 1 end
+    end
+    return n
+end
+
+-- the run's vehicles go when they sit on a loaded square within CAR_HOME tiles of a spot in spots (where the event put
+-- them). getCell():getVehicles() is not exposed to Lua on a dedicated server, so the squares around each spot are scanned
+-- for getVehicleContainer() instead (deduped: a car covers several squares). One that is occupied is a player's now: it
+-- stays and loses its tag, so no later pass takes it. A tagged car away from every spot is never found and stays tagged
+-- (another spot's queued pass may take it; one driven home is untagged when seen occupied). Returns removed, kept.
+local CAR_HOME = 10
+local function removeCars(runId, spots)
+    local cell, seen, hit, kept = getCell(), {}, {}, 0
+    for _, sp in ipairs(spots or {}) do
+        for dx = -CAR_HOME, CAR_HOME do
+            for dy = -CAR_HOME, CAR_HOME do
+                if dx * dx + dy * dy <= CAR_HOME * CAR_HOME then
+                    local okS, car = pcall(function()
+                        local sq = cell:getGridSquare(sp.x + dx, sp.y + dy, sp.z or 0)
+                        return sq and sq:getVehicleContainer()
+                    end)
+                    if okS and car and not seen[car] then
+                        seen[car] = true
+                        local ok, mine = pcall(function() return car:getModData().semRunId == runId end)
+                        if ok and mine then
+                            local _, taken = pcall(function()
+                                for s = 0, car:getMaxPassengers() - 1 do if car:getCharacter(s) then return true end end
+                                return car:getDriver() ~= nil
+                            end)
+                            if taken then
+                                kept = kept + 1
+                                pcall(function() car:getModData().semRunId = nil end)
+                            else
+                                hit[#hit + 1] = car
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    local n = 0
+    for _, car in ipairs(hit) do
+        if pcall(function() car:permanentlyRemove() end) then n = n + 1 end
+    end
+    return n, kept
+end
+
+-- every living zombie of the run that is loaded: ledger ids (survive unloads and restarts) and the in-memory tags
+local function removeZombies(run)
+    local zs, n, seen, mine = run.data and run.data.zs or {}, 0, {}, {}
+    local list = getCell():getZombieList()
+    for i = 0, list:size() - 1 do
+        local z = list:get(i)
+        local pid = Spawn.pidOf(z)
+        -- a natural zombie may share the id, so only one inside the event's own area counts as the run's
+        if pid and count(zs[pid]) > 0 and (not run.x or (z:getX() - run.x) ^ 2 + (z:getY() - run.y) ^ 2 <= C.EVENT_AREA ^ 2) then
+            mine[#mine + 1] = z
+        end
+    end
+    for _, t in pairs(tags) do
+        if t.runId == run.id and t.z then mine[#mine + 1] = t.z end
+    end
+    for _, z in ipairs(mine) do
+        if not seen[z] then
+            seen[z] = true
+            if pcall(function() z:removeFromWorld(); z:removeFromSquare() end) then
+                n = n + 1
+                local pid = Spawn.pidOf(z)
+                if pid and zs[pid] ~= nil then zs[pid] = 0 end -- removal fires no OnZombieDead, so the ledger is told
+            end
+        end
+    end
+    return n
+end
+
+-- Removes what the run spawned, in loaded ground; a site in ground that is not loaded is saved in Store.world.cleanups and
+-- cleaned by Spawn.pollQueue when it loads. Returns a note for the log. Runs before the event's stop (it clears the crate and
+-- ground lists).
+function Spawn.cleanUp(run)
+    local d, w = run.data or {}, SEM.Store.world
+    local cell, queued, ground = getCell(), 0, 0
+    for _, list in ipairs({ d.crates or {}, d.ground or {}, d.cars or {} }) do
+        for _, c in ipairs(list) do
+            local z, dup = c.z or 0, false
+            if not cell:getGridSquare(c.x, c.y, z) then
+                for _, e in ipairs(w.cleanups) do
+                    if e.id == run.id and e.x == c.x and e.y == c.y and e.z == z then dup = true end
+                end
+                if not dup then
+                    w.cleanups[#w.cleanups + 1] = { id = run.id, x = c.x, y = c.y, z = z, t = getTimestampMs() }
+                    queued = queued + 1
+                end
+            end
+        end
+    end
+    local crates = #(d.crates or {})
+    Spawn.removeCrates(run, "end", true, true)
+    for _, c in ipairs(d.ground or {}) do
+        local sq = cell:getGridSquare(c.x, c.y, c.z or 0)
+        if sq then ground = ground + removeGround(sq, run.id) end
+    end
+    local zombies = removeZombies(run)
+    local cars, kept = removeCars(run.id, d.cars)
+    local gone, seen, missing, notSem, refused, reason = 0, {}, 0, 0, 0, nil
+    local function retire(uid)
+        if seen[uid] then return end
+        seen[uid] = true
+        local ok, why = SEM.Compat_ALife.retire(uid)
+        if ok then gone = gone + 1
+        elseif why == "missing" then missing = missing + 1
+        elseif why == "not_sem" then notSem = notSem + 1
+        else refused, reason = refused + 1, reason or why end
+    end
+    for _, u in ipairs(d.uids or {}) do retire(u) end
+    for uid, t in pairs(npcs) do if t.runId == run.id then retire(uid) end end
+    local mod = SEM.Events[run.eventId]
+    if mod and mod.cleanup then
+        local ok, err = pcall(mod.cleanup, run)
+        if not ok then print("[SEM] cleanup error in run " .. run.id .. ": " .. tostring(err)) end
+    end
+    local note = "clean up: " .. zombies .. " zombie(s), " .. cars .. " vehicle(s), " .. gone .. " A-Life NPC(s), "
+        .. ground .. " loot pile(s) removed (" .. crates .. " crate(s) listed)"
+    if missing > 0 then note = note .. "; " .. missing .. " NPC(s) not found (already gone)" end
+    if notSem > 0 then note = note .. "; " .. notSem .. " NPC(s) not SEM's, left alone" end
+    if refused > 0 then note = note .. "; " .. refused .. " NPC(s) A-Life refused to purge (" .. tostring(reason) .. ")" end
+    if kept > 0 then note = note .. "; " .. kept .. " occupied vehicle(s) kept" end
+    if queued > 0 then note = note .. "; " .. queued .. " site(s) in unloaded ground wait for a player to load them" end
+    return note
+end
+
+-- ponytail: one entry per unloaded site of a cleaned-up run, each dropped after CLEANUP_QUEUE_MS (2 real hours), so the list
+-- cannot grow for ever; a site nobody loads in that time is left. Zombies of unloaded ground are not queued (no coordinates).
+local function pollCleanups(cell)
+    local list = SEM.Store and SEM.Store.world and SEM.Store.world.cleanups
+    if not list then return end
+    local now = getTimestampMs()
+    for i = #list, 1, -1 do
+        local e = list[i]
+        local sq = cell:getGridSquare(e.x, e.y, e.z)
+        if now - e.t > C.CLEANUP_QUEUE_MS or e.t > now then
+            table.remove(list, i)
+        elseif sq then
+            table.remove(list, i)
+            pcall(function()
+                local obj = Spawn.findCrate(sq, e.id)
+                if obj then sq:transmitRemoveItemFromSquare(obj) end
+                removeGround(sq, e.id)
+                removeCars(e.id, { e })
+            end)
+        end
+    end
 end
 
 local queue, lastPoll = {}, 0
@@ -781,7 +1066,8 @@ end)
 -- Once a second, every deferred entry asks the cell for its square, so a far site never depends on LoadGridsquare firing on a
 -- dedicated server. getGridSquare on an unloaded square just answers nil, so this stays cheap.
 function Spawn.pollQueue()
-    if #queue == 0 then return end
+    local waiting = SEM.Store and SEM.Store.world and #SEM.Store.world.cleanups or 0
+    if #queue == 0 and waiting == 0 then return end
     local now = getTimestampMs()
     if now - lastPoll < 1000 then return end
     lastPoll = now
@@ -795,6 +1081,7 @@ function Spawn.pollQueue()
             if not ok then SEM.Runner.fail(e.run, "spawn error: " .. tostring(err)) end
         end
     end
+    pollCleanups(cell)
 end
 
 -- OnTickEvenPaused: players can join and load the area while the world clock is held

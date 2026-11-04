@@ -20,7 +20,7 @@ local HELP = {
     eventId = "The event this entry runs when its time comes.",
     preset = "Options to run with. Default runs the event's own settings from its page. If a named preset is deleted later, the entry skips and Logs says why.",
 }
-local GEN_HELP = "Adds the number of Random Game Time entries you choose, 1 to 50, using your saved presets in turn, with random waits, armed and ready. They are named Auto. It only adds: no entry is changed or deleted. It stops at 50 entries in all."
+local GEN_HELP = "Adds the number of Random Game Time entries you choose, 1 to 50, using your saved presets and each event's Default settings in turn, with random waits, armed and ready. They are named Auto. It only adds: no entry is changed or deleted. It stops at 50 entries in all."
 local ON_HELP = "Tick to arm this entry so it fires on its schedule. Clear it to pause the entry without deleting it."
 local USE_SAVED = "Default"
 
@@ -258,6 +258,14 @@ function P.list(c, f, view, y)
     b.dis = add("Disable", 60, function() bulk(c, "disable", "Disable") end)
     b.delSel = add("Delete Selected", 110, function() bulk(c, "delete", "Delete") end)
     b.gen.tooltip = GEN_HELP
+    b.reset = add("Reset to Default", 120, function()
+        T.confirm("This deletes all " .. #list .. " scheduled events and replaces them with the default setup. Running events are not stopped. Continue?", function()
+            c.serverErrs = {}
+            Net.send("resetToDefault", {})
+            c:applyErrors()
+        end)
+    end)
+    b.reset.tooltip = "Deletes every schedule and rebuilds the starter set: Airdrop, Aircraft Crash, Stranger Calls For Help, Convoy Wreck, Migrating Horde and Super Zombies. Your own presets and the event pages are kept."
     y = y + T.bh() + 12
     -- columns from the view width. A 24 px select column leads and a 36 px On column trails; Next keeps its
     -- width and the four text columns share what is left, so the Schedule column shrinks first

@@ -1,4 +1,4 @@
--- Server Event Manager: Active Events panel (runs, Cancel, Teleport) and Logs panel (notices, history), newest first.
+-- Server Event Manager: Active Events panel (runs, Cancel, Teleport) and Logs panel (every log entry with its time), newest first.
 if isServer() then return end
 require "SEM/Theme"
 require "SEM/Net"
@@ -17,7 +17,6 @@ local function titles()
     return t
 end
 
-local COLOUR = { failed = "red", cancelled = "red", warning = "hot", fired = "green", ended = "dim" }
 
 -- greedy word wrap to maxW pixels; cached per string and width
 local wrapCache = {}
@@ -88,8 +87,9 @@ local function drawActive(v)
 end
 
 local function put(v, str, col, w, y)
+    local top = -v:getYScroll() -- a log can be 2000 entries: only the rows in view are drawn
     for i, line in ipairs(wrap(str, w - 8)) do
-        T.text(v, line, 6 + (i > 1 and 8 or 0), y, col)
+        if y + LINE >= top and y <= top + v:getHeight() then T.text(v, line, 6 + (i > 1 and 8 or 0), y, col) end
         y = y + LINE
     end
     return y
@@ -97,20 +97,16 @@ end
 
 local function drawLogs(v)
     LINE = math.max(16, T.fh() + 2)
-    local c, snap, ids = T.c, SEM.Net.snapshot or {}, titles()
+    local c = T.c
     local w = v:getWidth() - 20
     local y = 4
     v.hits = {}
-    for _, n in ipairs(SEM.Net.lines) do
-        y = put(v, n.text, n.bad and c.red or c.hot, w, y)
-    end
-    local hist = snap.history or {}
-    for i = #hist, 1, -1 do
-        local e = hist[i]
-        if type(e) == "table" then
-            local k = COLOUR[string.lower(tostring(e.state or e.result or ""))] or "amber"
-            y = put(v, F.entryText(e, ids), c[k], w, y)
-        end
+    local so, co = SEM.Net.offsets()
+    local log = SEM.Net.log
+    for i = #log, 1, -1 do -- newest first
+        local e = log[i]
+        if e.lineKey ~= tostring(so) .. tostring(co) then e.lineKey, e.line = tostring(so) .. tostring(co), F.logLine(e, so, co) end
+        y = put(v, e.line, e.bad and c.red or c.amber, w, y)
     end
     if y == 4 then return empty(v, "No log entries") end
     if y ~= v.lastH then v.lastH = y; v:setScrollHeight(y + 8) end
@@ -121,8 +117,8 @@ end
 function Feed.export()
     local stamp = function(at) return os.date("!%Y-%m-%d %H:%M:%S", at) .. " UTC" end
     local now = os.time()
-    local text = F.logExport((SEM.Net.snapshot or {}).history, SEM.Net.lines, titles(), stamp,
-        "Server Event Manager logs, exported " .. stamp(now))
+    local so, co = SEM.Net.offsets()
+    local text = F.logExport(SEM.Net.log, so or (SEM.Net.snapshot or {}).serverOffsetMin, co, "Server Event Manager logs, exported " .. stamp(now))
     local name = "SEM_logs_" .. os.date("!%Y%m%d_%H%M%S", now) .. ".txt"
     local ok, err = pcall(function()
         local w = getFileWriter(name, true, false)

@@ -62,7 +62,7 @@ local function run()
     local ev = Store.config.events.airdrop
     local o = {}
     for k, v in pairs(ev.options) do o[k] = v end
-    o.leadMinutes, o.soundOn, o.markerExact, o.title, o.locationMode = 1, false, true, "Test Drop", "nearRandomPlayer"
+    o.showWarning, o.leadMinutes, o.soundOn, o.markerExact, o.title, o.locationMode = true, 1, false, true, "Test Drop", "nearRandomPlayer"
     o.crateCount, o.guardType, o.guardCount = 2, "zombies", 8
     o.lootPack = { "High" }
     sent = {}
@@ -112,7 +112,10 @@ local function run()
     -- late joiner
     sent = {}
     S(SEM.Config.MODULE, "hello", player, nil)
-    check("late join marker", find("markerState") and #find("markerState").markers, 1)
+    local function markerOf(list, id)
+        for _, m in ipairs(list or {}) do if m.id == id then return m end end
+    end
+    check("late join marker", markerOf(find("markerState") and find("markerState").markers, r.id) ~= nil, true)
 
     -- exact marker follows the crate (no real crate here, so the Runner hook is called directly)
     sent = {}
@@ -121,7 +124,7 @@ local function run()
     check("marker re-sent", mm ~= nil, true)
     check("marker on crate", mm and mm.x .. "," .. mm.y, (r.x + 7) .. "," .. (r.y + 3))
     check("marker same id", mm and mm.id, r.id)
-    check("late join sees crate", R.markers()[1].x, r.x + 7)
+    check("late join sees crate", (markerOf(R.markers(), r.id) or {}).x, r.x + 7)
 
     -- Random resolves once per run
     Store.config.events.airdrop.options.guardType = "random"
@@ -389,7 +392,7 @@ local function run()
     local a0 = R.begin("airdrop", "force")
     check("lead 0: no flyover", find("alert") and find("alert").flyover == true, false)
     if a0 then R.cancel(a0.id) end
-    fo.leadMinutes = 1
+    fo.showWarning, fo.leadMinutes = true, 1
     sent = {}
     local a1 = R.begin("airdrop", "force")
     check("lead 1: no flyover in the warning", find("alert") and find("alert").flyover == true, false)
@@ -437,11 +440,11 @@ local function run()
     -- 6: anchor saved at announce; everyone gone, the run carries on
     check("anchor saved", sr.anchor and sr.anchor.x .. "," .. sr.anchor.y, "10770,10000")
     R.cancel(sr.id)
-    fo.leadMinutes, fo.locationMode = 1, "nearRandomPlayer"
+    fo.showWarning, fo.leadMinutes, fo.locationMode = true, 1, "nearRandomPlayer"
     local ar = R.begin("airdrop", "force")
     local ho0 = Store.config.events.horde.options
     local keepHLead, keepHTarget = ho0.leadMinutes, ho0.targetType
-    ho0.leadMinutes, ho0.targetType = 1, "randomPlayer"
+    ho0.showWarning, ho0.leadMinutes, ho0.targetType = true, 1, "randomPlayer"
     Store.config.limits.maxConcurrent = 5
     local hz = R.begin("horde", "force")
     getOnlinePlayers = noPlayers

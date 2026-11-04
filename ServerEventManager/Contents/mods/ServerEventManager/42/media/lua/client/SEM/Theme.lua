@@ -14,6 +14,7 @@ Theme.c = {
     bg = col(0, 0, 0, 0.8), panel = col(0.1, 0.1, 0.1, 0.6), line = col(0.4, 0.4, 0.4, 1),
     amber = col(1, 1, 1), dim = col(0.7, 0.7, 0.7), red = col(0.92, 0.22, 0.16),
     redDark = col(0.35, 0.07, 0.05), green = col(0.45, 0.82, 0.3), hot = col(1, 1, 1), sel = col(0.7, 0.35, 0.15, 0.3),
+    accent = col(0.95, 0.65, 0.2), banner = col(0.16, 0.16, 0.16, 0.95),
 }
 Theme.font = { small = UIFont.Small, med = UIFont.Medium, big = UIFont.Large }
 Theme.ROW = 26
