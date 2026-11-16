@@ -9,27 +9,13 @@ local Alerts = {}
 SEM.Alerts = Alerts
 Alerts.flyovers = {}
 
-local PING = "SEM_RadioChatter" -- scripts/ServerEventManager/sounds_sem.txt
+local PING, BOOM = "SEM_RadioChatter", "SEM_CrashBoom" -- scripts/ServerEventManager/sounds_sem.txt (credits: CREDITS.txt)
+local STALE_MS = 60000 -- a queued banner older than this is no longer news
 local SHOW_MS, FADE_MS, SOUND = 9000, 1500, "Helicopter" -- sound id exists in scripts/generated/sounds/sounds_meta.txt
 
 local waiting, lastStart = {}, 0 -- D41: banners wait their turn, one at a time, ALERT_GAP real seconds apart
 
 local Banner =ISPanel:derive("SEMBanner")
-
-local function wrap(text, maxW)
-    local lines, cur = {}, ""
-    for word in tostring(text):gmatch("%S+") do
-        local try = cur == "" and word or (cur .. " " .. word)
-        if cur ~= "" and T.tw(try) > maxW then
-            lines[#lines + 1] = cur
-            cur = word
-        else
-            cur = try
-        end
-    end
-    if cur ~= "" then lines[#lines + 1] = cur end
-    return lines
-end
 
 function Banner:prerender()
     local left = SHOW_MS - (getTimestampMs() - self.born)
@@ -39,13 +25,12 @@ function Banner:prerender()
         return
     end
     local a = math.min(1, left / FADE_MS)
-    local c = T.c
-    T.rect(self, 0, 0, self.width, self.height, c.bg, 0.85 * a)
-    T.frame(self, 0, 0, self.width, self.height, c.red, a)
-    T.text(self, self.title, 14, 8, c.hot, T.font.big, a)
-    local y = 12 + T.fh(T.font.big)
+    -- like vanilla's own server alert (ISAlert): bare text, no box
+    local mid = self.width / 2
+    self:drawTextCentre(self.title, mid, 0, 1, 0.1, 0.1, a, T.font.big)
+    local y = 4 + T.fh(T.font.big)
     for _, l in ipairs(self.lines) do
-        T.text(self, l, 14, y, c.amber, T.font.med, a)
+        self:drawTextCentre(l, mid, y, 1, 1, 1, a, T.font.med)
         y = y + T.fh(T.font.med)
     end
 end
@@ -73,11 +58,11 @@ end
 
 local function display(args)
     local w = math.min(640, getCore():getScreenWidth() - 40)
-    local lines = wrap(args.message or "", w - 28)
-    local h = 20 + T.fh(T.font.big) + #lines * T.fh(T.font.med)
-    local b = Banner:new((getCore():getScreenWidth() - w) / 2, 90, w, h)
+    local lines = T.wrap(args.message or "", w - 28, T.font.med)
+    local h = 8 + T.fh(T.font.big) + #lines * T.fh(T.font.med)
+    local b = Banner:new((getCore():getScreenWidth() - w) / 2, getCore():getScreenHeight() / 4, w, h)
     b:initialise()
-    b.title, b.lines, b.born = tostring(args.title or "Server event"), lines, getTimestampMs()
+    b.title, b.lines, b.born = tostring(args.title or SEM.t("alert_title", "Server event")), lines, getTimestampMs()
     b.backgroundColor = { r = 0, g = 0, b = 0, a = 0 }
     b.borderColor = { r = 0, g = 0, b = 0, a = 0 }
     b:addToUIManager()
@@ -98,16 +83,16 @@ function Alerts.flyover(args)
     Alerts.flyovers[args.id] = { snd = snd, em = em, born = getTimestampMs() }
 end
 
--- Aircraft Crash going active: one loud explosion for every player (radio rule as the flyover). "Loud Explosion" by
--- DRAGON-STUDIO, https://pixabay.com/sound-effects/loud-explosion-425457/ (Pixabay Content License), converted to ogg; see CREDITS.txt
+-- Aircraft Crash going active: one loud explosion for every player (radio rule as the flyover)
 function Alerts.boom(args)
     local p = getPlayer()
     if not p or (args.radio and not Alerts.hasRadio(p)) then return end
-    getSoundManager():playUISound("SEM_CrashBoom")
+    getSoundManager():playUISound(BOOM)
 end
 
 function Alerts.show(args)
     if args.radio and not Alerts.hasRadio(getPlayer()) then return end
+    args.queuedAt = getTimestampMs()
     waiting[#waiting + 1] = args
 end
 
@@ -135,6 +120,7 @@ end
 local lastCheck = 0
 Events.OnTick.Add(function()
     local t = getTimestampMs()
+    while waiting[1] and t - waiting[1].queuedAt > STALE_MS do table.remove(waiting, 1) end -- stale: take the next
     if waiting[1] and not Alerts.current and (t - lastStart >= SEM.Config.ALERT_GAP * 1000 or t < lastStart) then
         lastStart = t
         local ok, err = pcall(display, table.remove(waiting, 1))

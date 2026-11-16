@@ -69,7 +69,7 @@ function Spawn.treeCover(x, y)
 end
 
 local FOREST_COVER = 0.12 -- tuning knob: tree fraction at or under which ground counts as clear for Avoid Forest
-local CLEAR_MODES = { town = true, countryside = true, nearRandomPlayer = true, nearChosenPlayer = true }
+local CLEAR_MODES = { town = true, randomTown = true, countryside = true, nearRandomPlayer = true, nearChosenPlayer = true }
 
 -- Avoid Forest on real squares, once, when the site is loaded. Moves run.x,y (and the marker) to the nearest clear ring
 -- point; warns and stays when none within 60 tiles. At most 6 rings * 12 points * 49 samples lookups.

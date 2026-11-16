@@ -12,7 +12,8 @@ local Bar = ISPanel:derive("SEM_EventBar")
 SEM.EventBar = Bar
 
 local W, MINW, HEAD, ROW, RADIO_MS = 300, 220, 22, 20, 2000 -- W is the default width; HEAD and ROW grow with the font
-local WORD = { ended = "Completed", cancelled = "Cancelled", failed = "Failed" }
+local WORD = { ended = "Completed", cancelled = "Cancelled", failed = "Failed" } -- English fallbacks; translated where drawn (the game's text may not be ready at load)
+local WORD_KEY = { ended = "bar_ended", cancelled = "bar_cancelled", failed = "bar_failed" }
 local items = {} -- { id, title, state, status, radio, leftUntil (ms), goneAt (ms) }
 local radioAt, radioYes = 0, false
 
@@ -39,7 +40,7 @@ local function rows()
 end
 
 local function statusOf(e)
-    if WORD[e.state] then return WORD[e.state], T.c.dim end
+    if WORD[e.state] then return SEM.t(WORD_KEY[e.state], WORD[e.state]), T.c.dim end
     local word = e.status or (e.state == "pending" and "Pending" or "Active")
     if e.leftUntil then
         local s = math.max(0, math.ceil((e.leftUntil - now()) / 1000))
@@ -64,7 +65,7 @@ end
 
 function Bar:initialise()
     ISPanel.initialise(self)
-    self.fold = T.btn("-", self.width - 24, 2, 20, self, Bar.onFold)
+    self.fold = T.iconBtn("media/ui/inventoryPanes/Button_Collapse.png", self.width - 24, 2, 20, self, Bar.onFold)
     self:addChild(self.fold)
     T.grip(self, MINW, 0, true)
     self:setFolded(getPlayer():getModData().semBarFolded == true)
@@ -73,7 +74,7 @@ end
 function Bar:setFolded(on)
     self.folded = on
     self.grip:setVisible(not on) -- folded, the bar is one header high and the grip would sit on the fold button
-    self.fold:setTitle(on and "+" or "-")
+    self.fold:setImage(getTexture(on and "media/ui/inventoryPanes/Button_Pin.png" or "media/ui/inventoryPanes/Button_Collapse.png"))
     getPlayer():getModData().semBarFolded = on
 end
 
@@ -99,15 +100,17 @@ function Bar:prerender()
     T.placeGrip(self)
     T.saveSize(self, "semBar")
     ISPanel.prerender(self)
+    T.titleBar(self, 1, 1, self.width - 2, HEAD - 1)
 end
 
 function Bar:render()
     local c, list = T.c, self.list or {}
     T.drawGrip(self)
-    T.text(self, "Server Events" .. (#list > 0 and (" (" .. #list .. ")") or ""), 8, 3, #list > 0 and c.hot or c.amber)
+    local title = SEM.t("bar_title", "Server Events") .. (#list > 0 and (" (" .. #list .. ")") or "")
+    T.text(self, title, (self.width - T.tw(title)) / 2, 3, #list > 0 and c.hot or c.amber)
     if self.folded then return end
     if #list == 0 then
-        T.text(self, "Nothing happening", 8, HEAD + 2, c.dim)
+        T.text(self, SEM.t("bar_empty", "Nothing happening"), 8, HEAD + 2, c.dim)
         return
     end
     for i, e in ipairs(list) do

@@ -41,11 +41,13 @@ function Theme.textRight(el, str, x, y, c, font)
     el:drawTextRight(str, x, y, c.r, c.g, c.b, c.a, font or Theme.font.small)
 end
 
-local fitCache = {}
+local fitCache, fitCount = {}, 0
 -- str shortened with ".." to fit maxW pixels; results cached per string and width
 function Theme.fit(str, maxW)
     local k = str .. "|" .. maxW
     if fitCache[k] then return fitCache[k] end
+    if fitCount > 400 then fitCache, fitCount = {}, 0 end -- changing strings and resize drags would grow it for ever
+    fitCount = fitCount + 1
     local out = str
     if Theme.tw(out) > maxW then
         while #out > 1 and Theme.tw(out .. "..") > maxW do out = out:sub(1, -2) end
@@ -56,11 +58,11 @@ function Theme.fit(str, maxW)
 end
 
 -- str broken into lines no wider than maxW pixels (a single longer word keeps its own line)
-function Theme.wrap(str, maxW)
+function Theme.wrap(str, maxW, font)
     local lines, line = {}, ""
     for word in tostring(str):gmatch("%S+") do
         local try = line == "" and word or (line .. " " .. word)
-        if line ~= "" and Theme.tw(try) > maxW then
+        if line ~= "" and Theme.tw(try, font) > maxW then
             lines[#lines + 1], line = line, word
         else
             line = try
@@ -172,14 +174,38 @@ function Theme.placeGrip(win)
     if g then g:setX(win.width - g.width); g:setY(win.height - g.height) end
 end
 
--- the three-dot-staircase mark in the window's bottom-right corner
+local gripTex, titleTex
+-- vanilla resize icon in the window's bottom-right corner (dots only when the texture is missing)
 function Theme.drawGrip(win)
     local g = win.grip
     if not g or not g:getIsVisible() then return end
+    gripTex = gripTex or getTexture("media/ui/ResizeIcon.png")
+    if gripTex then
+        win:drawTextureScaled(gripTex, win.width - g.width, win.height - g.height, g.width, g.height, (g.resizing or g.mouseOver) and 1 or 0.7, 1, 1, 1)
+        return
+    end
     local c = (g.resizing or g.mouseOver) and Theme.c.hot or Theme.c.dim
     for a = 0, 2 do
         for b = 0, 2 - a do Theme.rect(win, win.width - 4 - a * 4, win.height - 4 - b * 4, 2, 2, c) end
     end
+end
+
+-- vanilla window title-bar texture
+function Theme.titleBar(el, x, y, w, h)
+    titleTex = titleTex or getTexture("media/ui/Panel_TitleBar.png")
+    if titleTex then el:drawTextureScaled(titleTex, x, y, w, h, 1, 1, 1, 1) else Theme.rect(el, x, y, w, h, Theme.c.panel) end
+end
+
+-- image-only button, built like vanilla ISCollapsableWindow's close button
+function Theme.iconBtn(path, x, y, size, target, fn)
+    local b = ISButton:new(x, y, size, size, "", target, fn)
+    b:initialise()
+    b:instantiate()
+    b.borderColor.a = 0
+    b.backgroundColor.a = 0
+    b.backgroundColorMouseOver.a = 0
+    b:setImage(getTexture(path))
+    return b
 end
 
 -- per-player window size, kept in player modData beside the bar position

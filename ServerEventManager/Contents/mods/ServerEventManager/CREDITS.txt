@@ -16,4 +16,4 @@ Server Event Manager - third-party assets
 "Loud Explosion" by DRAGON-STUDIO
   https://pixabay.com/sound-effects/loud-explosion-425457/
   Pixabay Content License (https://pixabay.com/service/license-summary/)
-  Changed: converted to Ogg Vorbis. Used as media/sound/SEM_CrashBoom.ogg.
+  Changed: converted to Ogg Vorbis, softened (low-pass, fade in and out, 9 dB quieter). Used as media/sound/SEM_CrashBoom.ogg.

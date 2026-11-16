@@ -26,6 +26,9 @@ SEM gives you, with no extra code:
 - A map marker (exact or fuzzy circle, radio rules) for events with a site.
 - Announcements: banners and sounds, optionally radio-only.
 - Limits: `maxConcurrent` (how many scheduled events may run at once) and `maxZombiesPerEvent` (through `Spawn.clamp`).
+- Where random sites land: every random Location Mode prefers a spot near a road (`SEM.Targets.nearRoad(x, y)` is true when a road
+  zone is at the point or within about 30 tiles), and none lands closer to an online player than the `playerDistance` limit
+  (Minimum Distance From Players, default 60 tiles).
 - Restart persistence: live runs, their options and `run.data` are saved in the world's global ModData and carry on.
 - When your mod is removed, its saved options, presets and schedules are kept out of sight and come back when it returns.
 
@@ -401,10 +404,10 @@ Your server file should `require "SEM/Events/Wildfire"` before using it.
 
 ### Moving the site to a new random spot
 
-`SEM.Targets.RANDOM_MODES` is the set of location modes that pick a new random point each time (`town`, `countryside`,
+`SEM.Targets.RANDOM_MODES` is the set of location modes that pick a new random point each time (`town`, `randomTown`, `countryside`,
 `nearRandomPlayer`, `nearChosenPlayer`). Only for those can `SEM.Targets.resolve(run.options, preferClass, run.anchor)`
-give a different site on a second call. Crash checks it before moving to a new site and fails otherwise. Map, safehouse
-and Jeem base modes always name the same place.
+give a different site on a second call. Crash checks it before moving to a new site and fails otherwise. Only the Selected Location mode (`map`)
+always names the same place.
 
 ## 6. Client side
 
@@ -549,7 +552,7 @@ In game:
 2. Check the server log for `[SEM] registerEvent refused` or `has no server module`.
 3. Press F7 (or right-click the world, or the Admin Panel button) to open the console. Your event is under **Modded
    Events**.
-4. Set Lead Minutes to 0, Location Mode to Near Random Player, and press **Trigger Now**.
+4. Set Lead Minutes to 0, Location Mode to Random Player, and press **Trigger Now**.
 5. Watch the status line on the run in Active Events, and the server log lines `[SEM] run <id> ...`.
 6. Walk to the marker. Loot the crate. The run should end with "cache looted".
 7. Trigger it again and Cancel it. Trigger it again and let the duration run out.

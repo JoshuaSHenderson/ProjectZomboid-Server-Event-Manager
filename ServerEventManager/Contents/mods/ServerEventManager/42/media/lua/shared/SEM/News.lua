@@ -2,8 +2,12 @@
 SEM = SEM or {}
 
 SEM.News = {
-    version = "0.4.0-beta", -- keep equal to modversion in both mod.info files
+    version = "0.5.0-beta", -- keep equal to modversion in both mod.info files
     lines = {
+        "0.5.0-beta: Location Mode is now Random, Random Countryside, Random Town, Random Player, Selected Town, Selected Player or Selected Location. Random Countryside is anywhere on the map outside towns.",
+        "Random spots prefer a road. The new Minimum Distance From Players limit keeps random locations away from online players.",
+        "Under Siege targets Random Player or Selected Player and attacks that player's own base.",
+        "Map circles keep their true radius at every zoom, and the notification banner looks like the game's own server alert.",
         "0.4.0-beta: A new server starts with six safe events already scheduled (Reset to Default brings them back). Clean Up At End removes what an event spawned when it ends.",
         "Aircraft Crash picks from a list of known clear sites, so planes land reliably, and its marker never moves. Under Siege waves come from several sides.",
         "Mark Hostiles, marker colours by event kind, Flyover Volume for Airdrop, and Set all plus 30 percent chance for loot tables. Logs have timestamps and no cap.",
@@ -16,10 +20,6 @@ SEM.News = {
         "Weapon Packs: choose the guns and melee weapons hostile NPCs spawn with, modded weapons included.",
         "Convoy loot is in the trunks and gloveboxes now, not a crate.",
         "Extra Per Player (Percent): bigger events when more players are online. Random guards have their own minimum and maximum.",
-        "NPC Difficulty, Exact With Radio markers, your local time beside the server's, and Copy for presets.",
-        "Migrating Horde targets: Location, Random, Random Town, Random Countryside, Random Player.",
-        "Modders can add their own events (see MODDING.md).",
-        "This Home page and a walkthrough for first-time setup. Import / Export is its own page and no longer sticks on loading.",
     },
 }
 

@@ -372,6 +372,9 @@ require "SEM/Server"
 for _, f in ipairs(initCbs) do f() end
 local Store = SEM.Store
 local function send(p, cmd, args) sent = {} handlers[1]("ServerEventManager", cmd, p, args) end
+-- hello throttle off for the specs that call it twice; its own spec turns it on
+SEM.HELLO_EVERY_MS = 0
+function getTimestampMs() return 1 end
 local function flat(o)
     local out = {}
     local function w(v, path)
@@ -408,6 +411,23 @@ t("hello public", function()
     check("to sender", sent[1].to, plain)
     check("markerState", sent[1].cmd, "markerState")
     check("empty", #sent[1].args.markers, 0)
+end)
+
+t("hello throttle", function()
+    local realMs, ms = getTimestampMs, 5000
+    getTimestampMs = function() return ms end
+    SEM.HELLO_EVERY_MS = 2000
+    send(plain, "hello", {})
+    check("first answered", #sent > 0, true)
+    ms = 6999
+    send(plain, "hello", {})
+    check("inside window ignored", #sent, 0)
+    send(adminA, "hello", {})
+    check("other player answered", #sent > 0, true)
+    ms = 7000
+    send(plain, "hello", {})
+    check("after window answered", #sent > 0, true)
+    SEM.HELLO_EVERY_MS, getTimestampMs = 0, realMs
 end)
 
 t("bad option saves nothing", function()
@@ -698,10 +718,12 @@ t("D23-D25", function()
     for _, f in ipairs(town) do
         if f.key == "locationMode" then lm = f elseif f.key == "town" then tw = f elseif f.key == "avoidForest" then af = f end
     end
-    check("Random first", tw.choices[1], "Random")
-    local has = false
-    for _, c in ipairs(lm.choices) do if c == "countryside" then has = true end end
-    check("countryside", has, true)
+    check("town never Random", tw.choices[1], "Muldraugh")
+    check("location choices", table.concat(lm.choices, ","), "random,countryside,randomTown,nearRandomPlayer,town,nearChosenPlayer,map")
+    check("random picks", table.concat(lm.randomFrom, ","), "countryside,randomTown,nearRandomPlayer")
+    check("labels", F.label(lm, "countryside") .. "|" .. F.label(lm, "randomTown") .. "|" .. F.label(lm, "nearRandomPlayer") .. "|" .. F.label(lm, "town")
+        .. "|" .. F.label(lm, "nearChosenPlayer") .. "|" .. F.label(lm, "map") .. "|" .. F.label(lm, "random"),
+        "Random Countryside|Random Town|Random Player|Selected Town|Selected Player|Selected Location|Random")
     check("avoidForest default", af.default, true)
     check("avoidForest only where it acts", af.showIf.key, "locationMode")
     -- every option, limit, schedule and condition field needs a help blurb
@@ -1138,7 +1160,7 @@ t("random enums resolve once per run", function()
     local r = R.begin("airdrop", "force")
     check("guard not random", r.options.guardType == "zombies" or r.options.guardType == "npc", true)
     check("tier resolved", r.options.npcTier:find("^tier%d$") ~= nil, true)
-    check("mode in randomFrom " .. tostring(r.options.locationMode), ({ town = 1, countryside = 1, nearRandomPlayer = 1 })[r.options.locationMode] ~= nil, true)
+    check("mode in randomFrom " .. tostring(r.options.locationMode), ({ randomTown = 1, countryside = 1, nearRandomPlayer = 1 })[r.options.locationMode] ~= nil, true)
     check("config untouched", o.guardType, "random")
     check("recorded", r.resolved.guardType, r.options.guardType)
     R.status(r, "Landed")
@@ -1256,16 +1278,16 @@ end)
 
 t("siege shows its base on the map during the warning", function()
     freshWorld()
-    local Sg, realBases, realNear = SEM.Events.siege, SEM.Targets.bases, SEM.Spawn.playerNear
-    SEM.Targets.bases = function() return { { id = "b1", label = "Fort", kind = "safehouse", x = 500, y = 600 } } end
-    SEM.Spawn.playerNear = function() return true end
-    local run = { id = 993, options = { siegeTarget = "random" }, data = {} }
+    local Sg, realBases, realPlayers = SEM.Events.siege, SEM.Targets.bases, SEM.Targets.players
+    SEM.Targets.bases = function() return { { id = "b1", label = "Fort", kind = "safehouse", x = 500, y = 600, owner = "bob" } } end
+    SEM.Targets.players = function() return { { getUsername = function() return "bob" end, getX = function() return 510 end, getY = function() return 600 end } } end
+    local run = { id = 993, options = { siegeTarget = "randomPlayer" }, data = {} }
     local x, y = Sg.preview(run)
     check("preview spot", tostring(x) .. "," .. tostring(y), "500,600")
     check("kept for start", run.data.preview.label, "Fort")
     SEM.Targets.bases = function() return {} end
-    check("no base yet", Sg.preview({ id = 994, options = { siegeTarget = "random" }, data = {} }), nil)
-    SEM.Targets.bases, SEM.Spawn.playerNear = realBases, realNear
+    check("no base yet", Sg.preview({ id = 994, options = { siegeTarget = "randomPlayer" }, data = {} }), nil)
+    SEM.Targets.bases, SEM.Targets.players = realBases, realPlayers
 end)
 
 t("export logs as text", function()
@@ -2683,12 +2705,13 @@ t("D16: an anchor saved at announce lets nearRandomPlayer and Horde carry on wit
     local p, why = realResolve(o, nil, { x = 1000, y = 2000 })
     check("resolved from the anchor", p ~= nil, true)
     local d = math.sqrt((p.x - 1000) ^ 2 + (p.y - 2000) ^ 2)
-    check("40 to 100 tiles from it", d >= 39 and d <= 101, true)
+    local D = SEM.Store.config.limits.playerDistance
+    check("D to D + 60 tiles from it", d >= D - 1 and d <= D + 61, true)
     p, why = realResolve(o, nil, nil)
     check("no anchor, nobody: fails as before", why, "no players online")
     online = { pa }
     p = realResolve(o, nil, { x = 1000, y = 2000 })
-    check("a player online wins over the anchor", math.abs(p.x - 123) <= 101, true)
+    check("a player online wins over the anchor", math.abs(p.x - 123) <= D + 61, true)
     -- Horde: waits at the anchor for a player instead of failing
     online = {}
     local Ho, Sp = SEM.Events.horde, SEM.Spawn
@@ -2875,34 +2898,6 @@ t("map bounds use cells, with an inclusive last cell", function()
     getWorld, getCellSizeInSquares = realW, realC
 end)
 
-t("base and safehouse targets move just outside the protected zone", function()
-    local Ta = SEM.Targets
-    local zones = { { x1 = 90, y1 = 190, x2 = 120, y2 = 220 } }
-    local x, y = Ta.outside(zones, 105, 200, 3)
-    check("nearest edge is top", y, 190 - 1 - 3); check("x kept", x, 105)
-    x, y = Ta.outside(zones, 118, 205, 3)
-    check("nearest edge is right", x, 120 + 1 + 3)
-    x, y = Ta.outside(zones, 5, 5, 3)
-    check("outside stays", x .. "," .. y, "5,5")
-    -- through the resolver: a safehouse centre inside its zone is moved out for an event that respects protection
-    local realSH = SafeHouse
-    SafeHouse = { getSafehouseList = function() return { size = function() return 1 end, get = function() return {
-        getX = function() return 1000 end, getY = function() return 2000 end, getW = function() return 10 end, getH = function() return 10 end,
-        getTitle = function() return "H" end, getOwner = function() return "h" end, getOwner = function() return "h" end } end } end }
-    SEM.Safety.refresh()
-    local realOnline = SEM.Targets.online
-    SEM.Targets.online = function() return { names = { h = true }, factions = {} } end
-    local p = realResolve({ locationMode = "randomSafehouse" })
-    check("centre was protected", SEM.Safety.isProtected(1005, 2005), true)
-    check("target is not", SEM.Safety.isProtected(p.x, p.y), false)
-    local reach = 5 + SEM.Config.PROTECT_MARGIN + SEM.Config.PROTECT_PAD + 1
-    check("and close enough for findSquare's 15", math.abs(p.x - 1005) <= reach and math.abs(p.y - 2005) <= reach, true)
-    p = realResolve({ locationMode = "randomSafehouse", respectProtected = false })
-    check("event that ignores protection keeps the centre", p.x .. "," .. p.y, "1005,2005")
-    SafeHouse, SEM.Targets.online = realSH, realOnline
-    SEM.Safety.refresh()
-end)
-
 t("wildfire blocks and edge band", function()
     local W = SEM.Events.wildfire
     check("11 by 11 chunk blocks", #W.blocks({ { x = 100, y = 100 } }, 40, 8), 11 * 11)
@@ -3009,17 +3004,112 @@ t("wildfire burn time runs from ignition", function()
     check("none recorded counts from 0", W.update({ placed = true, elapsed = 60, options = { burnMinutes = 1 }, data = {} }), "burn time over")
 end)
 
-t("countryside searches around the anchor with nobody online", function()
-    local C = SEM.Config
-    online = {}
-    local p = realResolve({ locationMode = "countryside" }, nil, { x = 1000, y = 2000 })
-    check("found", p ~= nil, true)
-    local d = math.sqrt((p.x - 1000) ^ 2 + (p.y - 2000) ^ 2)
-    check("ring around the anchor", d >= C.RING_MIN - 1 and d <= C.RING_MAX + 1, true)
-    local q, why = realResolve({ locationMode = "countryside" }, nil, nil)
+-- the location modes: Random Countryside, Random Town, Selected Town, Random Player, Selected Player
+local function locWorld()
+    local Ta, C = SEM.Targets, SEM.Config
+    local real = { players = Ta.players, classAt = Ta.classAt }
+    local function who(name, x, y) return { getUsername = function() return name end, getX = function() return x end, getY = function() return y end } end
+    local function dist(p, x, y) return math.sqrt((p.x - x) ^ 2 + (p.y - y) ^ 2) end
+    local function inTown(p, pad)
+        for _, tw in pairs(C.TOWNS) do if dist(p, tw.x, tw.y) <= tw.r + pad then return true end end
+        return false
+    end
+    return Ta, C, who, dist, inTown, function() Ta.players, Ta.classAt = real.players, real.classAt end
+end
+
+t("countryside lands outside every town, needs no player and keeps its distance from one", function()
+    local Ta, C, who, dist, inTown, undo = locWorld()
+    local lim = SEM.Store.config.limits
+    local keep = lim.playerDistance
+    Ta.players = function() return {} end
+    for i = 1, 40 do
+        local p = realResolve({ locationMode = "countryside" })
+        check("found with nobody online " .. i, p ~= nil, true)
+        check("outside every town and its 50 margin " .. i, inTown(p, 50), false)
+    end
+    lim.playerDistance = 300
+    local me = who("me", C.TOWNS.Muldraugh.x + 300, C.TOWNS.Muldraugh.y)
+    Ta.players = function() return { me } end
+    for i = 1, 40 do
+        local p = realResolve({ locationMode = "countryside" })
+        check("300 from the player " .. i, dist(p, me:getX(), me:getY()) >= 300, true)
+    end
+    lim.playerDistance = keep
+    undo()
+end)
+
+t("countryside prefers a spot near a road and still lands where no road exists", function()
+    local Ta, C, who, dist, inTown, undo = locWorld()
+    Ta.players = function() return {} end
+    Ta.classAt = function(x) return x < 9000 and "road" or "field" end -- the road runs along the west only
+    for i = 1, 20 do
+        local p = realResolve({ locationMode = "countryside" })
+        check("near the road " .. i, p.x <= 9000 + C.ROAD_REACH, true)
+    end
+    Ta.classAt = function() return "field" end
+    local p = realResolve({ locationMode = "countryside" })
+    check("no road anywhere: still found", p ~= nil and not inTown(p, 50), true)
+    check("nearRoad sees the road itself", (function() Ta.classAt = function(x, y) return x == 5 and y == 5 and "road" or "field" end return Ta.nearRoad(5, 5) end)(), true)
+    check("nearRoad sees a road ROAD_REACH away", Ta.nearRoad(5 + C.ROAD_REACH, 5 - C.ROAD_REACH), true)
+    check("nearRoad sees a road half of it away", Ta.nearRoad(5 - math.floor(C.ROAD_REACH / 2), 5), true)
+    check("nearRoad beyond it", Ta.nearRoad(5 + C.ROAD_REACH + 5, 5), false)
+    undo()
+end)
+
+t("randomTown and town land inside the town; an old Random still resolves", function()
+    local Ta, C, who, dist, inTown, undo = locWorld()
+    Ta.players = function() return {} end
+    local R = C.TOWNS.Rosewood
+    for i = 1, 20 do
+        local p = realResolve({ locationMode = "town", town = "Rosewood" })
+        check("selected town " .. i, dist(p, R.x, R.y) <= R.r + 1, true)
+    end
+    local function inAny(p) return inTown(p, 1) end
+    for i = 1, 20 do
+        check("random town " .. i, inAny(realResolve({ locationMode = "randomTown" })), true)
+        check("old Random " .. i, inAny(realResolve({ locationMode = "town", town = "Random" })), true)
+    end
+    local p, why = realResolve({ locationMode = "town", town = "Nowhere" })
+    check("unknown town", p, nil)
+    check("says so", why, "unknown town Nowhere")
+    undo()
+end)
+
+t("player modes ring D to D + 60 round the player and keep D from every player", function()
+    local Ta, C, who, dist, inTown, undo = locWorld()
+    local lim = SEM.Store.config.limits
+    local keep = lim.playerDistance
+    local a, b = who("a", 5000, 5000), who("b", 5130, 5000)
+    Ta.players = function() return { a, b } end
+    for _, d in ipairs({ 60, 200 }) do
+        lim.playerDistance = d
+        for i = 1, 25 do
+            local p = realResolve({ locationMode = "nearChosenPlayer", chosenPlayer = "a", avoidForest = false })
+            local da, db = dist(p, 5000, 5000), dist(p, 5130, 5000)
+            check("D " .. d .. " from the chosen " .. i, da >= d and da <= d + 61, true)
+            check("D " .. d .. " from the other " .. i, db >= d, true)
+        end
+        for i = 1, 25 do
+            local p = realResolve({ locationMode = "nearRandomPlayer", avoidForest = false })
+            check("random player keeps D " .. d .. " from both " .. i, dist(p, 5000, 5000) >= d and dist(p, 5130, 5000) >= d, true)
+        end
+    end
+    local q, why = realResolve({ locationMode = "nearChosenPlayer", chosenPlayer = "zed" })
+    check("chosen player offline", why, "chosen player is not online")
+    lim.playerDistance = keep
+    undo()
+end)
+
+t("nearRandomPlayer round the anchor with nobody online, and fails without one", function()
+    local Ta, C, who, dist, inTown, undo = locWorld()
+    Ta.players = function() return {} end
+    local p = realResolve({ locationMode = "nearRandomPlayer" }, nil, { x = 1000, y = 2000 })
+    local D = SEM.Store.config.limits.playerDistance
+    check("ring round the anchor", dist(p, 1000, 2000) >= D - 1 and dist(p, 1000, 2000) <= D + 61, true)
+    local q, why = realResolve({ locationMode = "nearRandomPlayer" }, nil, nil)
     check("no anchor, nobody", q, nil)
-    check("reason", why, "no players online to search around")
-    online = { adminA, adminB, plain }
+    check("reason", why, "no players online")
+    undo()
 end)
 
 t("a crate that rolled empty gets one item", function()
@@ -3640,15 +3730,47 @@ t("wildfire guard scans only blocks touching a zone", function()
     check("no zones", #W.touching({ { 0, 0 } }, {}, 8), 0)
 end)
 
-t("siege picks allowed bases only", function()
-    local S2 = SEM.Events.siege
-    local b = { { id = "a", kind = "safehouse" }, { id = "b", kind = "jeem" }, { id = "c", kind = "home" } }
-    check("random skips homes", #S2.candidates(b, "random", ""), 2)
-    check("safehouse", S2.candidates(b, "randomSafehouse", "")[1].id, "a")
-    check("jeem", S2.candidates(b, "randomJeemBase", "")[1].id, "b")
-    check("chosen home refused", #S2.candidates(b, "chosenBase", "c"), 0)
-    check("chosen", S2.candidates(b, "chosenBase", "a")[1].id, "a")
-    check("chosen gone", #S2.candidates(b, "chosenBase", "z"), 0)
+t("siege picks a base through its player", function()
+    local S2, Ta = SEM.Events.siege, SEM.Targets
+    local function on(...) local n = {} for _, k in ipairs({ ... }) do n[k] = true end return { names = n, factions = {} } end
+    local bases = { { id = "a", kind = "safehouse", owner = "ann", x = 0, y = 0 }, { id = "j", kind = "jeem", owner = "ann", x = 50, y = 0 },
+        { id = "h", kind = "home", owner = "ann", x = 1, y = 1 }, { id = "n", kind = "safehouse", x = 2, y = 2 },
+        { id = "m", kind = "safehouse", owner = "bob", members = { "cy" }, x = 900, y = 900 } }
+    local mine = S2.candidates(bases, S2.owns(on("ann")))
+    check("owner's bases, no home, no ownerless", #mine, 2)
+    check("ownerless never matches", #S2.candidates({ bases[4] }, S2.owns(on("ann"))), 0)
+    check("ownerless never matches anyone", #S2.candidates({ bases[4] }, S2.owns(on("ann", "bob", "cy"))), 0)
+    check("home never matches", #S2.candidates({ bases[3] }, S2.owns(on("ann"))), 0)
+    check("a member counts", #S2.candidates({ bases[5] }, S2.owns(on("cy"))), 1)
+    check("a faction base counts", #S2.candidates({ { id = "f", kind = "safehouse", ownerKind = "faction", owner = "Crew" } }, S2.owns({ names = {}, factions = { Crew = true } })), 1)
+    local function pl(name, x, y, ...) return { name = name, x = x, y = y, on = on(name, ...) } end
+    local first = function() return 0 end
+    local b = S2.choose({ siegeTarget = "chosenPlayer", siegePlayer = "ann" }, { pl("ann", 40, 0) }, bases, first)
+    check("nearest base wins", b.id, "j")
+    b = S2.choose({ siegeTarget = "chosenPlayer", siegePlayer = "ann" }, { pl("ann", 5, 0) }, bases, first)
+    check("nearest base wins, other side", b.id, "a")
+    local _, why = S2.choose({ siegeTarget = "chosenPlayer", siegePlayer = "ann" }, { pl("bob", 0, 0) }, bases, first)
+    check("chosen offline", why, "chosen player is not online")
+    _, why = S2.choose({ siegeTarget = "chosenPlayer", siegePlayer = "dee" }, { pl("dee", 0, 0) }, bases, first)
+    check("chosen has no base", why, "dee has no base")
+    b = S2.choose({ siegeTarget = "chosenPlayer", siegePlayer = "ann" }, { pl("ann", 5000, 5000) }, bases, first)
+    check("chosen far from home still counts", b.id, "j")
+    _, why = S2.choose({ siegeTarget = "randomPlayer" }, {}, bases, first)
+    check("random, nobody", why, "no players online")
+    _, why = S2.choose({ siegeTarget = "randomPlayer" }, { pl("dee", 0, 0) }, bases, first)
+    check("random, nobody owns", why, "no player owns a base")
+    _, why = S2.choose({ siegeTarget = "randomPlayer" }, { pl("ann", 5000, 5000), pl("dee", 0, 0) }, bases, first)
+    check("random, nobody near", why, "no player is near their base")
+    b = S2.choose({ siegeTarget = "randomPlayer" }, { pl("ann", 5000, 5000), pl("bob", 905, 900), pl("dee", 0, 0) }, bases, first)
+    check("random: the one who is home", b.id, "m")
+    -- through pickBase: Targets.bases and Targets.players stand in
+    local realBases, realPlayers = Ta.bases, Ta.players
+    Ta.bases = function() return bases end
+    Ta.players = function() return { { getUsername = function() return "ann" end, getX = function() return 10 end, getY = function() return 0 end } } end
+    check("preview through the game", S2.preview({ id = 995, options = { siegeTarget = "randomPlayer" }, data = {} }), 0)
+    Ta.players = function() return { { getUsername = function() return "dee" end, getX = function() return 10 end, getY = function() return 0 end } } end
+    check("no base for dee", S2.preview({ id = 996, options = { siegeTarget = "chosenPlayer", siegePlayer = "dee" }, data = {} }), nil)
+    Ta.bases, Ta.players = realBases, realPlayers
 end)
 
 t("hunted names the player in its start message", function()
@@ -3706,13 +3828,6 @@ t("a base counts as online through its owner or a member", function()
     check("faction base", B({ ownerKind = "faction", owner = "Crew" }, on), true)
     check("other faction", B({ ownerKind = "faction", owner = "Others" }, on), false)
     check("no owner known", B({}, on), true)
-end)
-
-t("offline bases are never picked", function()
-    local S2 = SEM.Events.siege
-    local b = { { id = "a", kind = "safehouse", offline = true }, { id = "b", kind = "jeem" } }
-    check("siege random", #S2.candidates(b, "random", ""), 1)
-    check("siege chosen offline", #S2.candidates(b, "chosenBase", "a"), 0)
 end)
 
 t("clear site", function()
@@ -3879,7 +3994,7 @@ t("D42: siege waves go incoming, attacking, regroup", function()
     run.data.uids, run.data.dead = { "a", "b" }, { a = true, b = true }
     S2.update(run)
     check("regroup", run.data.phase, "regroup")
-    check("regroup notice", told[#told], "Enemy are regrouping, heal up and prepare for another wave!")
+    check("regroup notice", told[#told], "The attackers are regrouping. Patch yourself up, another wave is coming.")
     check("regroup deadline", run.data.at, run.elapsed + 300)
     check("regroup bar", run.barText .. run.barTitle, "Incoming WaveUnder Siege 2/2")
     check("regroup countdown", run.barAt, R.clock() + 300)
@@ -3895,7 +4010,7 @@ t("D42: siege waves go incoming, attacking, regroup", function()
     check("cumulative want", run.data.want, 4)
     run.data.uids, run.data.dead = { "a", "b", "c", "d" }, { a = true, b = true, c = true, d = true }
     check("last wave dead ends it", S2.update(run), "siege broken, all attackers dead")
-    check("pushed back notice", told[#told], "Enemy has been pushed back.")
+    check("pushed back notice", told[#told], "The attackers have been driven off.")
     -- a 0.1.0 run has no phase: it carries on as attacking
     local old = { id = 991, eventId = "siege", state = "active", title = "S", x = 1, y = 1, elapsed = 0, lastSeen = now, placed = true,
         options = { title = "S", waves = 1, waveMinutes = 5, waveWarnSeconds = 30 },
@@ -4261,7 +4376,7 @@ t("migrate schema 3: pack options become lists", function()
     local c = cfg(3)
     Store.migrate(c)
     check("schema 3 untouched", c.events.convoy.options.lootPack, "Low")
-    check("schema is 7", SEM.Config.SCHEMA, 7)
+    check("schema is 8", SEM.Config.SCHEMA, 8)
     local e = J.decode(cfgText())
     e.events.convoy.options.lootPack = "Low"
     e.schema = 2
@@ -4411,7 +4526,7 @@ t("siege: waveSeconds replaces waveMinutes, old configs and runs convert", funct
     local ui = io.open("ServerEventManager/Contents/mods/ServerEventManager/42/media/lua/shared/Translate/EN/UI.json"):read("*a")
     check("label", ui:find('"UI_SEM_opt_waveSeconds": "Seconds Between Waves"', 1, true) ~= nil, true)
     check("old label gone", ui:find("waveMinutes", 1, true), nil)
-    check("schema", SEM.Config.SCHEMA, 7)
+    check("schema", SEM.Config.SCHEMA, 8)
     local cfg = { schema = 3, events = { siege = { options = { waveMinutes = 2, waves = 3 } }, camp = { options = { waveMinutes = 7 } } },
         presets = { S = { eventId = "siege", options = { waveMinutes = 1 } }, C = { eventId = "camp", options = {} } } }
     Store.migrate(cfg)
@@ -4425,19 +4540,142 @@ t("siege: waveSeconds replaces waveMinutes, old configs and runs convert", funct
     check("schema 4 untouched", cur.events.siege.options.waveSeconds, 90)
 end)
 
+t("limits: playerDistance is 20 to 300, old configs get 60", function()
+    local O = SEM.Options
+    local function lim(n) return (O.validate(Store.limitsSchema, { maxZombiesPerEvent = 200, maxConcurrent = 2, playerDistance = n })) end
+    check("20", lim(20), true); check("300", lim(300), true)
+    check("19", lim(19), false); check("301", lim(301), false)
+    check("default", O.defaults(Store.limitsSchema).playerDistance, 60)
+    check("Config default", SEM.Config.PLAYER_DISTANCE, 60)
+    local old = J.decode(cfgText())
+    old.limits.playerDistance = nil
+    check("old config loads with the default", Store.buildConfig(old).limits.playerDistance, 60)
+    old.limits.playerDistance = 150
+    check("a saved value stays", Store.buildConfig(old).limits.playerDistance, 150)
+    send(adminA, "saveLimits", { maxZombiesPerEvent = 100, maxConcurrent = 2, playerDistance = 301 })
+    check("server refuses 301", Store.config.limits.playerDistance, 60)
+    send(adminA, "saveLimits", { maxZombiesPerEvent = 100, maxConcurrent = 2, playerDistance = 90 })
+    check("server saves 90", Store.config.limits.playerDistance, 90)
+    send(adminA, "saveLimits", { maxZombiesPerEvent = 200, maxConcurrent = 2, playerDistance = 60 })
+end)
+
+t("migrate schema 8: random towns, old base modes and Siege targets", function()
+    local function cfg(schema, mode, town, o)
+        o = o or {}
+        o.locationMode, o.town = mode, town
+        return { schema = schema, events = { airdrop = { options = o }, siege = { options = { siegeTarget = "random", siegeBase = "Fort", waves = 3 } } },
+            presets = { P = { eventId = "siege", options = { siegeTarget = "chosenBase", siegeBase = "x" } }, Q = { eventId = "camp", options = { locationMode = "randomJeemBase" } } } }
+    end
+    local c = cfg(7, "town", "Random")
+    Store.migrate(c)
+    check("random town mode", c.events.airdrop.options.locationMode, "randomTown")
+    check("random town gets a real town", c.events.airdrop.options.town, "Muldraugh")
+    c = cfg(7, "town", "Rosewood")
+    Store.migrate(c)
+    check("a named town stays", c.events.airdrop.options.locationMode .. c.events.airdrop.options.town, "townRosewood")
+    for _, old in ipairs({ "randomSafehouse", "randomJeemBase" }) do
+        c = cfg(7, old, "Muldraugh")
+        Store.migrate(c)
+        check(old, c.events.airdrop.options.locationMode, "nearRandomPlayer")
+    end
+    c = cfg(7, "countryside", "Muldraugh")
+    Store.migrate(c)
+    check("countryside untouched", c.events.airdrop.options.locationMode, "countryside")
+    check("siege random", c.events.siege.options.siegeTarget, "randomPlayer")
+    check("siegeBase removed", c.events.siege.options.siegeBase, nil)
+    check("other siege options kept", c.events.siege.options.waves, 3)
+    check("preset chosenBase", c.presets.P.options.siegeTarget, "randomPlayer")
+    check("preset siegeBase removed", c.presets.P.options.siegeBase, nil)
+    check("preset location mode", c.presets.Q.options.locationMode, "nearRandomPlayer")
+    for _, old in ipairs({ "randomSafehouse", "randomJeemBase" }) do
+        c = cfg(6, "map", "Muldraugh")
+        c.events.siege.options.siegeTarget = old
+        Store.migrate(c)
+        check("siege " .. old, c.events.siege.options.siegeTarget, "randomPlayer")
+    end
+    c = cfg(8, "town", "Random")
+    c.events.siege.options = { siegeTarget = "random", siegeBase = "Fort" }
+    Store.migrate(c)
+    check("schema 8 untouched", c.events.airdrop.options.locationMode .. c.events.siege.options.siegeTarget, "townrandom")
+    -- the migrated config validates, and an import of an old one goes through
+    local e = J.decode(cfgText())
+    e.schema = 7
+    e.events.airdrop.options.locationMode, e.events.airdrop.options.town = "town", "Random"
+    e.events.siege.options.siegeTarget, e.events.siege.options.siegeBase = "randomJeemBase", "Fort"
+    local built = Store.buildConfig(e)
+    check("import 7 town", built.events.airdrop.options.locationMode, "randomTown")
+    check("import 7 siege", built.events.siege.options.siegeTarget, "randomPlayer")
+end)
+
+t("Crash site list in countryside: any site off the towns and away from players, near a road first", function()
+    local T, C = SEM.Targets, SEM.Config
+    freshWorld()
+    local w = SEM.Store.world
+    w.learnedSites, w.recentSites, w.siteStrikes = {}, {}, {}
+    local realList, realPlayers, realClass = package.loaded["SEM/CrashSites"], T.players, T.classAt
+    local lim = SEM.Store.config.limits
+    local town = C.TOWNS.Muldraugh
+    package.loaded["SEM/CrashSites"] = {
+        { x = town.x + 10, y = town.y, r = 14, k = "plane" },       -- inside a town
+        { x = 3000, y = 3000, r = 14, k = "plane" },                -- off road
+        { x = 4000, y = 4000, r = 14, k = "plane" },                -- on the road
+        { x = 5000, y = 5000, r = 14, k = "plane" },                -- next to a player
+    }
+    T.players = function() return { { getUsername = function() return "p" end, getX = function() return 5010 end, getY = function() return 5000 end } } end
+    T.classAt = function(x, y) return math.abs(x - 4000) < 40 and math.abs(y - 4000) < 40 and "road" or "field" end
+    local o = { locationMode = "countryside", aircraft = "plane", useSiteList = true }
+    for i = 1, 10 do
+        w.recentSites = {}
+        local p = realResolve(o)
+        check("the road site " .. i, p.site and p.site.x, 4000)
+    end
+    T.classAt = function() return "field" end
+    local seen = {}
+    for i = 1, 40 do
+        w.recentSites = {}
+        local p = realResolve(o)
+        seen[p.site and p.site.x or "ring"] = true
+    end
+    check("no road: either far site", seen[3000] and seen[4000], true)
+    check("never the town site", seen[town.x + 10], nil)
+    check("never the site beside a player", seen[5000], nil)
+    package.loaded["SEM/CrashSites"], T.players, T.classAt = realList, realPlayers, realClass
+    freshWorld()
+end)
+
+t("Horde's town and countryside targets use the new modes", function()
+    local T = SEM.Targets
+    local realPlayers = T.players
+    T.players = function() return {} end
+    local ctx = SEM.Events.horde.ctx()
+    local a, why = ctx.town()
+    check("town", a ~= nil, true)
+    local b = ctx.countryside()
+    check("countryside", b ~= nil, true)
+    T.players = realPlayers
+end)
+
 t("Minimum Age shows for near-random-player only; Avoid Forest only where it acts", function()
     for _, d in ipairs(SEM.EventDefs) do
         local at = {}
         for _, g in ipairs(d.options) do at[g.key] = g.showIf end
-        if at.minAgeDays and d.id ~= "horde" and d.id ~= "hunted" then
+        if at.minAgeDays and d.id ~= "horde" and d.id ~= "hunted" and d.id ~= "siege" then
             check(d.id .. " minAge", at.minAgeDays.equals, "nearRandomPlayer")
             check(d.id .. " minAge any", at.minAgeDays.any, nil)
-            check(d.id .. " avoidForest", table.concat(at.avoidForest.any, ","), "town,countryside,nearRandomPlayer,nearChosenPlayer")
+            check(d.id .. " avoidForest", table.concat(at.avoidForest.any, ","), "countryside,randomTown,town,nearRandomPlayer,nearChosenPlayer")
             check(d.id .. " town", at.town.equals, "town")
             check(d.id .. " chosenPlayer", at.chosenPlayer.equals, "nearChosenPlayer")
             check(d.id .. " location", at.location.equals, "map")
         end
     end
+    local sg = {}
+    for _, g in ipairs(SEM.EventDefs.byId.siege.options) do sg[g.key] = g end
+    check("siege minAge", sg.minAgeDays.showIf.equals, "randomPlayer")
+    check("siege picker", sg.siegePlayer.picker .. sg.siegePlayer.showIf.equals .. tostring(sg.siegeBase), "playerchosenPlayernil")
+    check("siege targets", table.concat(sg.siegeTarget.choices, ",") .. sg.siegeTarget.default, "randomPlayer,chosenPlayerrandomPlayer")
+    local hu
+    for _, g in ipairs(SEM.EventDefs.byId.hunted.options) do if g.key == "huntTarget" then hu = g end end
+    check("hunted labels", SEM.Fmt.label(hu, "randomPlayer") .. "|" .. SEM.Fmt.label(hu, "chosenPlayer"), "Random Player|Selected Player")
     local T = SEM.Targets
     local real = T.players
     T.players = function() return { { getHoursSurvived = function() return 10 end, getX = function() return 5 end, getY = function() return 5 end } } end
@@ -4740,14 +4978,16 @@ end)
 t("D56: a siege starts a zombie wave without A-Life, random picks zombies, an NPC wave is refused", function()
     freshWorld()
     local S2, Sp, Ta = SEM.Events.siege, SEM.Spawn, SEM.Targets
-    local realAL, realNear, realBases, realToNear, realFeed = SEM.Compat_ALife, Sp.playerNear, Ta.bases, R.toNear, R.sendFeed
-    SEM.Compat_ALife = { available = function() return false end }
+    local realAL, realNear, realBases, realToNear, realFeed, realPlayers = SEM.Compat_ALife, Sp.playerNear, Ta.bases, R.toNear, R.sendFeed, Ta.players
+    local function al(on) return { available = function() return on end, keyOf = function() end, factionOf = function() end } end
+    SEM.Compat_ALife = al(false)
     Sp.playerNear = function() return true end
-    Ta.bases = function() return { { id = "Fort", label = "Fort (bob)", kind = "safehouse", x = 100, y = 200, rect = { x1 = 90, y1 = 190, x2 = 110, y2 = 210 } } } end
+    Ta.players = function() return { { getUsername = function() return "bob" end, getX = function() return 105 end, getY = function() return 200 end } } end
+    Ta.bases = function() return { { id = "Fort", label = "Fort (bob)", kind = "safehouse", owner = "bob", x = 100, y = 200, rect = { x1 = 90, y1 = 190, x2 = 110, y2 = 210 } } } end
     R.toNear, R.sendFeed = function() end, function() end
     local function mk(id, wave)
         local run = { id = id, eventId = "siege", state = "active", title = "S", elapsed = 0, lastSeen = now,
-            options = { title = "S", siegeTarget = "random", siegeBase = "", waves = 2, waveWarnSeconds = 30, returnMinutes = 5, waveType = wave } }
+            options = { title = "S", siegeTarget = "randomPlayer", waves = 2, waveWarnSeconds = 30, returnMinutes = 5, waveType = wave } }
         Store.world.runs[tostring(id)] = run
         return run
     end
@@ -4766,7 +5006,7 @@ t("D56: a siege starts a zombie wave without A-Life, random picks zombies, an NP
     S2.start(run)
     check("npc refused", run.state, "failed")
     check("npc reason", run.reason, "Under Siege needs A-Life for NPC waves")
-    SEM.Compat_ALife = { available = function() return true end }
+    SEM.Compat_ALife = al(true)
     local seen = {}
     for i = 1, 40 do
         run = mk(980 + i, "random")
@@ -4774,7 +5014,7 @@ t("D56: a siege starts a zombie wave without A-Life, random picks zombies, an NP
         seen[run.data.waveType] = true
     end
     check("random with A-Life picks either", seen.npc and seen.zombies, true)
-    SEM.Compat_ALife, Sp.playerNear, Ta.bases, R.toNear, R.sendFeed = realAL, realNear, realBases, realToNear, realFeed
+    SEM.Compat_ALife, Sp.playerNear, Ta.bases, R.toNear, R.sendFeed, Ta.players = realAL, realNear, realBases, realToNear, realFeed, realPlayers
     freshWorld()
 end)
 
@@ -4811,7 +5051,7 @@ t("D56: a zombie wave is its refs, a restart counts it as beaten, the bar and ph
     alive = false
     S2.update(run)
     check("all refs dead: regroup", run.data.phase, "regroup")
-    check("regroup notice", told[#told], "Enemy are regrouping, heal up and prepare for another wave!")
+    check("regroup notice", told[#told], "The attackers are regrouping. Patch yourself up, another wave is coming.")
     run.elapsed = run.data.at
     S2.update(run)
     check("incoming again", run.data.phase, "incoming")
@@ -6276,7 +6516,7 @@ t("R17: Crash site list picks, widens, avoids recent, learns, strikes, falls bac
     check("kind plane", w.learnedSites[1].k, "plane")
     local o = { locationMode = "nearChosenPlayer", chosenPlayer = "p1", aircraft = "plane", useSiteList = true }
     local realPlayers, realIn, realZR = T.players, T.inMap, ZombRand
-    T.players = function() return { { getUsername = function() return "p1" end, getX = function() return 7000 end, getY = function() return 7050 end } } end
+    T.players = function() return { { getUsername = function() return "p1" end, getX = function() return 7000 end, getY = function() return 7080 end } } end
     T.inMap = function() return true end
     ZombRand = function() return 0 end
     local pos = realResolve(o, nil, nil, nil)

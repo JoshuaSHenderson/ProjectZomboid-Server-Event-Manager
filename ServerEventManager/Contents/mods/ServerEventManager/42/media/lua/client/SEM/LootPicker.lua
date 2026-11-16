@@ -486,7 +486,7 @@ end
 function P:render()
     local c, w, h = T.c, self.width, self.height
     local m = self.m
-    T.rect(self, 1, 1, w - 2, m.hdr, c.panel)
+    T.titleBar(self, 1, 1, w - 2, m.hdr)
     T.rect(self, 0, m.hdr + 1, w, 1, c.line)
     local k = self.kind
     T.text(self, T.fit(k.head .. ": " .. tostring(self.title), w - 24), 12, math.floor((m.hdr - T.fh(T.font.med)) / 2) + 1, c.amber, T.font.med)

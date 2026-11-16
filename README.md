@@ -3,7 +3,7 @@
 Project Zomboid Build 42 mod for multiplayer servers. It gives server admins an in-game console to set up,
 force, schedule and cancel server events: airdrops, hostile camps, migrating hordes, wildfires, super zombies, convoy
 wrecks, sieges, manhunts, rescue calls and aircraft crashes. Players get on-screen alerts, a sound and map markers. Mod id
-`ServerEventManager`, author JoshuaSHenderson, version 0.4.0-beta.
+`ServerEventManager`, author JoshuaSHenderson, version 0.5.0-beta.
 
 > **Beta, under active development. Expect bugs.** If you hit one, please
 > [open an issue](https://github.com/JoshuaSHenderson/ProjectZomboid-Server-Event-Manager/issues) with what you did and your `console.txt`.
@@ -107,7 +107,8 @@ logged on the server.
 - **Presets:** on each event page. **Save As** keeps the page's current options under a new name, **Update** saves
   edits to the chosen preset, and **Delete** removes it after a popup asks. At most 50 presets. A preset belongs to one event.
 - **Scheduler page:** a table of entries (see [Scheduler](#scheduler)).
-- **Limits page:** Max Zombies Per Event (1 to 500, default 200) and Max Concurrent Events (1 to 5, default 2).
+- **Limits page:** Max Zombies Per Event (1 to 500, default 200), Max Concurrent Events (1 to 5, default 2) and Minimum
+  Distance From Players (20 to 300 tiles, default 60): no random location lands closer than that to any online player.
 - **Trigger Now:** on the event page. A popup confirms the event and where it will happen. It runs the **saved** options;
   with unsaved edits it asks to Save and Trigger first, and skips the schedule and the cooldown. Forced events always start and do not count toward
   Max Concurrent Events.
@@ -130,9 +131,9 @@ Every event shares these option groups:
   with a small blinking marker. Otherwise players see a circle of the fuzzy radius that contains the site off-centre. Exact With
   Radio (default off) shows players carrying a charged radio or walkie-talkie the exact spot instead of the circle; the client
   decides, so a modded client could show it to anyone.
-- **Location:** Location Mode, plus the field that mode needs: Location for Map, Town for Town, Chosen Player for Near Chosen
-  Player, Minimum Character Age in Days (0 to 3650, default 0) for Near Random Player. Avoid Forest shows for Town, Countryside
-  and the two near-player modes. Migrating Horde, Under Siege and Hunted have no location options; they pick their own site.
+- **Location:** Location Mode, plus the field that mode needs: Location for Selected Location, Town for Selected Town, Selected
+  Player (a player picker) for Selected Player, Minimum Character Age in Days (0 to 3650, default 0) for Random Player. Avoid Forest shows for
+  every mode except Selected Location. Migrating Horde, Under Siege and Hunted have no location options; they pick their own site.
 - **General:** Duration Minutes (1 to 240). When it runs out the event ends and cleans up.
 - **Clean Up At End** (every event, default off): when the event ends it removes what it spawned: crates, ground loot, zombies, undriven vehicles near their spawn, A-Life NPCs and their camp scene. Ground not loaded is cleaned when it next loads, for up to 2 hours.
 - **Extra Per Player (Percent)** (0 to 200, default 0) on every event with a count: each online player beyond the first adds
@@ -225,9 +226,9 @@ its player pick ignores Minimum Character Age.
   a much bigger one). It waits until the ground within 40 tiles of the site is loaded (or a player is near) before it looks.
   The marker never moves once it is on the map: the wreck lands inside the circle players see. If no clear field is free,
   the crash knocks down trees to make one. An exact marker may shift up to 15 tiles onto the wreck. There is no
-  stand-in wreck. Use Site List (default on): in the random location modes the crash goes to a known clear field from a built-in list of 400 (plus fields earlier crashes proved), nearest to where the mode aims, never near the last 10 used; off picks any random spot. If no loot fits around the aircraft the run fails and no fire starts. It ends when every item is picked
+  stand-in wreck. Use Site List (default on): in the random location modes the crash goes to a known clear field from a built-in list of 400 (plus fields earlier crashes proved), never near the last 10 used. In Random Countryside it picks any listed field on the map outside towns and away from players, near a road first; off picks any random spot. If no loot fits around the aircraft the run fails and no fire starts. It ends when every item is picked
   up or at the time limit; what is left stays on the ground. Location Mode defaults to
-  Countryside.
+  Random Countryside.
 - **Wreck:** Aircraft (Random, Helicopter or Plane; default Random), Burnt Cars (0 to 6 extra burnt cars around the
   aircraft, default 0).
 - **Fire:** Fires (0 to 8, default 3), Burn Minutes (1 to 30, default 5). Fires never start on the crate or on safehouse
@@ -241,9 +242,10 @@ Waves attack a player's safehouse or Jeem base, one at a time, each from 2 to 4 
 the players there and may force entry. Zombie waves need no A-Life; they spawn and are steered toward the base like a
 Migrating Horde.
 
-- **Target:** Target Base (Random, Random Safehouse, Random Jeem Base, Chosen Base), Chosen Base. Random choices only pick a
-  base with a player within 100 tiles. A Chosen Base waits for a player until Duration ends. A base with nobody online is never
-  picked.
+- **Target:** Target (Random Player or Selected Player), Selected Player (a player picker), Minimum Character Age in Days
+  for Random Player. The siege attacks that player's own safehouse or Jeem base (the nearest, if they have several). Random
+  Player only picks a player within 100 tiles of their base. A Selected Player must be online and waits until a player is near the base. A base with nobody online is
+  never picked. Saves made with the old base targets become Random Player.
 - **Attackers:** Wave Type (NPC, Zombies or Random; default NPC; Random picks NPC or zombies each run, and zombies without
   A-Life), Attackers Per Wave (NPCs, 1 to 10, default 4), Zombie Attackers (1 to 500, default 40, capped by the zombie limit),
   Waves (1 to 6, default 2), Seconds Between Waves (10 to 1800, default 300, counted from when a wave is beaten), Wave Warning
@@ -271,7 +273,7 @@ with the stranger's faction, through Jeem's standing or A-Life's Standing reputa
 Needs A-Life. NPCs in A-Life's manhunt mode go after one player. Each update they get that player's exact position and any
 give-up state is cleared.
 
-- **Target:** Random Player or Chosen Player; Minimum Character Age in Days for Random Player. **Hunters:** Hunters (1 to 10,
+- **Target:** Random Player or Selected Player; Minimum Character Age in Days for Random Player. **Hunters:** Hunters (1 to 10,
   default 3), NPC Level, NPC Difficulty, Slow Hunters (default on: they walk where they would run), Spawn Distance (30 to 100,
   default 60).
 - Start Message names the hunted player: `{player}` is replaced by the name, or the name goes in front.
@@ -282,24 +284,29 @@ give-up state is cleared.
 
 ## Locations
 
-Location Mode choices (the dropdown also offers Random, which picks one of Town, Countryside or Near Random Player):
+Location Mode choices:
 
 | Mode | Where |
 | --- | --- |
-| Map | The exact x, y, z you set. **Map Pick** lets you click the world map; if the map is disabled on the server it uses your position. |
-| Town | A random point within the radius of the chosen town's centre. Towns: Muldraugh, West Point, Riverside, Rosewood, March Ridge, Louisville, Ekron, Brandenburg, Irvington, or Random. |
-| Countryside | Outside towns: fields and roads, 150 to 600 tiles from a random online player. |
-| Near Random Player | 40 to 100 tiles from a random online player. |
-| Near Chosen Player | 40 to 100 tiles from the named player, who must be online. |
-| Random Safehouse | Next to a random safehouse (see [Safety](#safety-and-caps)). |
-| Random Jeem Base | Next to a random Jeem base. Needs Jeem Extension. |
+| Random | Picks Random Countryside, Random Town or Random Player each run. |
+| Random Countryside | Anywhere on the map outside every town: fields and roads, 150 to 1500 tiles out from a random town's edge. No player needed. |
+| Random Town | A random point within the radius of a random town. |
+| Random Player | Between the Minimum Distance From Players and 60 tiles further from a random online player. |
+| Selected Town | A random point within the radius of the town you pick. Towns: Muldraugh, West Point, Riverside, Rosewood, March Ridge, Louisville, Ekron, Brandenburg, Irvington. |
+| Selected Player | Between the Minimum Distance From Players and 60 tiles further from the named player, who must be online. |
+| Selected Location | The exact x, y, z you set, used as picked. **Map Pick** lets you click the world map; if the map is disabled on the server it uses your position. |
+
+Every random mode prefers a spot near a road (a road zone at the point or within about 30 tiles) and falls back to a plain
+spot when none is found. No random location lands closer than the Minimum Distance From Players to any online player; town
+modes relax that only when nothing else fits. Old saves keep working: a town set to Random becomes Random Town, and the
+Random Safehouse and Random Jeem Base modes become Random Player.
 
 **Avoid Forest** (on by default) is checked on the ground where the event lands. The mod counts trees there; if the spot
 is too wooded, it moves the crate or spawn square to clear ground nearby. The final square is checked the same way.
 
 **The site is picked at landing, not at the announcement.** Lead time only announces. When it ends, the mod picks the
 location, creates the marker and sends the "now on your map" alert. Nobody can wait at the site in advance. If every
-player has left by then, Near Random Player and Countryside use where a player stood at the announcement.
+player has left by then, Random Player uses where a player stood at the announcement. Random Countryside needs no player.
 
 Items are placed once ground near the site is loaded. If no player gets near enough to load it before the duration ends,
 the run fails with "Nobody reached the site before it expired". The final spot can be up to 15 tiles from the chosen
@@ -388,7 +395,7 @@ it again when it loads. A zombie the game removes without a death keeps the even
 
 Every player sees a small **Server Events** bar: incoming events with a countdown, active ones, and those resolved in the last 10
 minutes. It names titles only, never a location. The button folds it, dragging moves it, and it remembers both. Event markers
-show on the world map and the minimap; hover one to see what it is. Once Arrow When Left or fewer zombies or NPCs of an event remain
+show on the world map and the minimap; hover one to see what it is. A circle keeps its true radius at every zoom. Notifications show as the game's own server alert: a red title and white text a quarter of the way down the screen. A notice queued more than 60 seconds ago is dropped instead of showing late. Once Arrow When Left or fewer zombies or NPCs of an event remain
 (default 3, 0 for off), players within Arrow Range (default 150 tiles) get an on-screen arrow to the nearest, with the count and distance. Camp, Horde, Super Zombies,
 Under Siege, Stranger and Hunted have it. The bar lists at most 5 events. Map markers are coloured by kind: hostile bases (Hostile Camp, Under Siege, Hunted) red, Migrating Horde and Super Zombies green, Aircraft Crash blue, Airdrop and Convoy gold, Wildfire orange, Stranger teal. A mod's event can set `color`.
 
@@ -455,7 +462,7 @@ unpaused.
 
 - **Protected zones:** every safehouse, every Jeem base and every A-Life home, plus 10 tiles around each. Unclaimed
   player builds are not detected. Crates, vehicles, guard zombies and the Horde's spawn point avoid these. Wildfire can never
-  burn them: no fire starts there, and every 5 seconds the mod puts out any fire that has spread in. Safehouse and Jeem base location modes aim just outside the zone. A
+  burn them: no fire starts there, and every 5 seconds the mod puts out any fire that has spread in. A
   Horde with a Location target can still walk onto a base. The one exception is an Under Siege takeover, which destroys
   loot, starts fires and spawns enemies inside the base on purpose (see [Under Siege](#under-siege)).
 - **Zombie cap:** Max Zombies Per Event (default 200) limits guards, horde, super zombies, siege zombie waves and fallback zombies.
@@ -532,7 +539,7 @@ unpaused.
 
 `42/media/lua/shared/Translate/EN/UI.json` lists the console's texts as `UI_SEM_<key>`, with the English fallback. Copy it
 to another language folder (for example `Translate/FR/UI.json`) and translate the values. Only the strings that go through
-`SEM.t` are covered: window and rail titles, tab names, group headings and option labels. These are not translatable yet:
+`SEM.t` are covered: window and rail titles, tab names, group headings and option labels, plus the player-facing text on the bar, the banner and the map hover (`UI_SEM_*` keys). These are not translatable yet:
 the long help blurbs and option titles in `EventDefs.lua` and the Schedule and Conditions schemas, event titles, status
 text and Logs lines (which come from the server), choice labels, buttons such as Update, Save As, Cancel and Trigger Now, and the
 default alert texts.

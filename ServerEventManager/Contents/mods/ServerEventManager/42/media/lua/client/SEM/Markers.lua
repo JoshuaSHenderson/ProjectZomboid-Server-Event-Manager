@@ -42,12 +42,11 @@ local function draw(m, surface, api)
     if m.dot then r, g, b, a = 0.6, 0.6, 0.6, 1 end
     local handle = api:addGridSquareMarker(v.x, v.y, m.dot and 1 or v.radius, r, g, b, a)
     m.on[surface] = { handle = handle, api = api }
-    -- D8: no setMinScreenRadius, so every circle shows its set radius at any zoom
-    if m.dot then -- the admin dot stays a visible speck
-        pcall(function() handle:setMinScreenRadius(4) end)
-    elseif v.exact then
-        pcall(function() handle:setBlink(true) end)
-    end
+    -- D8: every circle shows its set radius at any zoom. The engine's default minimum is 64 screen pixels
+    -- (WorldMapGridSquareMarker.minScreenRadius), so an untouched circle stops shrinking when zoomed out and covers far more
+    -- map than its radius: it must be set. 6 keeps a far-out circle a visible speck; the exact pin and admin dot stay small.
+    pcall(function() handle:setMinScreenRadius(m.dot and 4 or v.exact and 8 or 6) end)
+    if v.exact and not m.dot then pcall(function() handle:setBlink(true) end) end
 end
 
 local function worldApi()
@@ -97,10 +96,10 @@ function Markers.hover(ui, api)
         end
     end
     if not best then return end
-    local lines = { best.event or best.title or "Server event" }
+    local lines = { best.event or best.title or SEM.t("alert_title", "Server event") }
     if best.title and best.title ~= lines[1] then lines[#lines + 1] = best.title end
     if best.text and best.text ~= "" then lines[#lines + 1] = best.text end
-    lines[#lines + 1] = (best.view or best).exact and "Exact location" or "Somewhere in this circle"
+    lines[#lines + 1] = (best.view or best).exact and SEM.t("marker_exact", "Exact location") or SEM.t("marker_fuzzy", "Somewhere in this circle")
     local w, lh = 0, T.fh()
     for _, l in ipairs(lines) do w = math.max(w, T.tw(l)) end
     w = w + 16
@@ -122,8 +121,9 @@ function ISWorldMap:render()
     hoverSafe(self)
 end
 
+local renderMini = ISMiniMapInner.render
 function ISMiniMapInner:render()
-    ISUIElement.render(self)
+    if renderMini then renderMini(self) else ISUIElement.render(self) end
     hoverSafe(self)
 end
 

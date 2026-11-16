@@ -15,7 +15,9 @@ echo "Join: IP 127.0.0.1  port 16261  $( [ "$N" = 1 ] && echo 'user admin / pass
 cd "$GAME"
 # flags from ProjectZomboid64.json (steam flag dropped: -nosteam). -agentlib:zbNative is the ZombieBuddy agent, which loads
 # Java mods such as Viewpoint; it asks once per new jar in a native dialog.
-exec ./jre64/bin/java.exe -agentlib:zbNative --enable-native-access=ALL-UNNAMED \
+# SEM_VIEWPOINT=0: no ZombieBuddy agent, to match a server started the same way
+AGENT="-agentlib:zbNative"; [ "${SEM_VIEWPOINT:-1}" = 0 ] && AGENT=""
+exec ./jre64/bin/java.exe $AGENT --enable-native-access=ALL-UNNAMED \
   --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED \
   -XX:+UseG1GC -XX:-CreateCoredumpOnCrash -XX:-OmitStackTraceInFastThrow -Xmx4096m \
   "-Duser.home=$W_HOME" "-Ddeployment.user.cachedir=$W_HOME\Zomboid" \

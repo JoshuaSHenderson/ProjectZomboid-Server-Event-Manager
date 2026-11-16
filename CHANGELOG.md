@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.5.0-beta
+
+2026-11-16. Where events land, and Under Siege by player.
+
+### Added
+
+- Minimum Distance From Players (Limits page, 20 to 300 tiles, default 60): no random location lands closer than that to any
+  online player. Town modes relax it only when nothing else fits.
+- Every random location mode prefers a spot near a road (a road zone at the point or within about 30 tiles) and falls back to a
+  plain spot when none is found. Selected Location is used as picked.
+- Under Siege: Selected Player (a player picker) and Minimum Character Age for Random Player.
+- Player-facing text on the bar, banner and map hover can be translated (`UI_SEM_*` keys).
+
+### Changed
+
+- Location Mode is now Random (Countryside, Town or Player each run), Random Countryside, Random Town, Random Player, Selected
+  Town, Selected Player and Selected Location. Random Safehouse and Random Jeem Base are gone.
+- Random Countryside is anywhere on the map: 150 to 1500 tiles out from a random town's edge, outside every town. No player is
+  needed.
+- Random Player and Selected Player place the event between the Minimum Distance From Players and 60 tiles further out
+  (was a fixed 40 to 100).
+- Under Siege: Target is Random Player or Selected Player, and the siege attacks that player's own safehouse or Jeem base (the
+  nearest, if several). Random Player only picks a player within 100 tiles of their base. Chosen Base, Random Safehouse,
+  Random Jeem Base and plain Random are gone.
+- Hunted: the target labels read Random Player and Selected Player.
+- Aircraft Crash with Use Site List in Random Countryside picks any listed clear field on the map (outside towns, away from
+  players, near a road first), not the one nearest a player.
+- Saved settings are migrated (schema 8): a town set to Random becomes Random Town; Random Safehouse and Random Jeem Base become
+  Random Player; old Under Siege targets become Random Player. An export from 0.4.0 still imports.
+- The notification banner looks like the game's own server alert: red title, white text, no box, a quarter of the way down the
+  screen. Long messages wrap. A banner queued more than 60 seconds ago is dropped instead of showing late.
+- Windows use the game's own title bar, close, collapse, pin and resize icons (console, picker, Server Events bar).
+- The Aircraft Crash explosion is quieter and softer (same sound, same credit).
+- Faster: the Logs pane no longer re-wraps every entry each frame, the Scheduler table no longer rebuilds on every status
+  update, and the marks over event zombies and NPCs scan the zombie list four times a second instead of every frame.
+
+### Fixed
+
+- Map circles keep their true radius at every zoom. Before, a circle stopped shrinking when zoomed out, so it covered more map
+  than its radius and circles overlapped.
+- Active Events rows keep a fixed order; Cancel no longer makes them jump.
+- The server answers a client's hello at most once per 2 seconds per player.
+- Two Under Siege notices reworded: "The attackers have been driven off." and "The attackers are regrouping. Patch yourself up,
+  another wave is coming."
+- Avoid Forest's clearing pass covers Random Town.
+
 ## 0.4.0-beta
 
 Built from the 2026-11-03 live-server bug list and four play tests on the test server.

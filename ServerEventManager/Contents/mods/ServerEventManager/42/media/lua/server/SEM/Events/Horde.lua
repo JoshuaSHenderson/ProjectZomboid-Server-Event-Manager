@@ -100,13 +100,13 @@ end
 -- a town or countryside spot from Targets, as the location modes pick them
 local function spot(mode)
     return function()
-        local p, why = SEM.Targets.resolve({ locationMode = mode, town = "Random", avoidForest = true })
+        local p, why = SEM.Targets.resolve({ locationMode = mode, avoidForest = true })
         return p and { x = p.x, y = p.y, name = p.x .. "," .. p.y } or nil, why
     end
 end
 
 function Horde.ctx()
-    return { players = players, town = spot("town"), countryside = spot("countryside") }
+    return { players = players, town = spot("randomTown"), countryside = spot("countryside") }
 end
 
 local function farFromPlayers(x, y)

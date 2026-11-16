@@ -3,7 +3,7 @@ if isServer() then return end
 require "SEM/Config"
 require "SEM/Fmt"
 
-local Net = { snapshot = nil, recvMs = 0, log = {}, logSeq = 0 } -- log: the Logs pane, oldest first (Fmt.logInsert); logSeq: newest server entry number held
+local Net = { snapshot = nil, recvMs = 0, log = {}, logSeq = 0, logVer = 0 } -- logVer: bumped on every change to log; log: the Logs pane, oldest first (Fmt.logInsert); logSeq: newest server entry number held
 SEM.Net = Net
 
 local MAX_LOG = 2000 -- ponytail: same ceiling as the server's saved log (Runner LOG_MAX)
@@ -26,13 +26,14 @@ end
 -- a client-side notice for the Logs pane (no entry number); bad lines draw red
 function Net.line(text, bad)
     SEM.Fmt.logInsert(Net.log, { at = os.time(), text = tostring(text), bad = bad }, MAX_LOG)
+    Net.logVer = Net.logVer + 1
 end
 
 -- one entry from the server; asks for what is missing when its number skips ahead
 function Net.logEntry(e, inBatch)
     if type(e) ~= "table" or type(e.n) ~= "number" or type(e.at) ~= "number" then return end
     if not inBatch and e.n > Net.logSeq + 1 then Net.send("getLog", { since = Net.logSeq }) end
-    SEM.Fmt.logInsert(Net.log, e, MAX_LOG)
+    if SEM.Fmt.logInsert(Net.log, e, MAX_LOG) then Net.logVer = Net.logVer + 1 end
     if e.n > Net.logSeq then Net.logSeq = e.n end
 end
 
@@ -50,13 +51,18 @@ function Net.clock()
 end
 
 -- D52: the server's and this client's offsets from UTC in minutes, or nothing when either is unknown or they are the same
+local offsetsAt, offsetsS, offsetsC = -1000, nil, nil
 function Net.offsets()
+    local now = getTimestampMs()
+    if now - offsetsAt < 1000 then return offsetsS, offsetsC end -- two Calendar lookups: once a second is plenty
+    offsetsAt, offsetsS, offsetsC = now, nil, nil
     local server = Net.snapshot and Net.snapshot.serverOffsetMin
     local ok, mine = pcall(function()
         local k = Calendar.getInstance()
         return (k:get(Calendar.ZONE_OFFSET) + k:get(Calendar.DST_OFFSET)) / 60000
     end)
-    if type(server) == "number" and ok and mine ~= server then return server, mine end
+    if type(server) == "number" and ok and mine ~= server then offsetsS, offsetsC = server, mine end
+    return offsetsS, offsetsC
 end
 
 local function console(fn, ...)
@@ -108,6 +114,7 @@ function on.logBatch(args)
     args = type(args) == "table" and args or {}
     if type(args.top) == "number" and args.top < Net.logSeq then
         Net.log, Net.logSeq = {}, 0
+        Net.logVer = Net.logVer + 1
         return Net.send("getLog", { since = 0 })
     end
     for _, e in ipairs(args.entries or {}) do Net.logEntry(e, true) end

@@ -19,18 +19,58 @@ SEM.Events.siege = Siege
 Siege.ownSite = true -- no location options; start picks the base
 Siege.timeUpFails = true -- D42: a wave that never dies is a lost siege
 
--- Pure, specs in tests/run.lua. The bases siegeTarget allows; A-Life homes are not offered, a siege needs a claimed base, and a
--- base with nobody online is never one (D46)
-function Siege.candidates(bases, target, chosen)
+-- Pure, specs in tests/run.lua. The bases owns(b) accepts; A-Life homes never count, a siege needs a claimed base
+function Siege.candidates(bases, owns)
     local out = {}
     for _, b in ipairs(bases) do
-        if b.offline then -- skipped
-        elseif (target == "random" and b.kind ~= "home") or (target == "randomSafehouse" and b.kind == "safehouse")
-            or (target == "randomJeemBase" and b.kind == "jeem") or (target == "chosenBase" and b.kind ~= "home" and b.id == chosen) then
-            out[#out + 1] = b
-        end
+        if b.kind ~= "home" and owns(b) then out[#out + 1] = b end
     end
     return out
+end
+
+-- Pure. owns(b) for one player, on = Targets.onlineOf({ player }). A base that names nobody is nobody's, though baseOnline
+-- cannot rule it out
+function Siege.owns(on)
+    return function(b)
+        if b.owner == nil and b.createdBy == nil and not b.members then return false end
+        return SEM.Targets.baseOnline(b, on)
+    end
+end
+
+-- Pure, specs in tests/run.lua. The base this siege attacks, or nil and why. players = { { name, x, y, on } } (for a random
+-- target only those old enough), bases as Targets.bases gives them, rand(n) = 0..n-1. Chosen: that player's nearest base.
+-- Random: a player who is within SIEGE_NEAR of their nearest base, so nobody loses a base while away.
+function Siege.choose(o, players, bases, rand)
+    local function nearest(p)
+        local best, bd
+        for _, b in ipairs(Siege.candidates(bases, Siege.owns(p.on))) do
+            local d = (b.x - p.x) ^ 2 + (b.y - p.y) ^ 2
+            if not bd or d < bd then best, bd = b, d end
+        end
+        return best, bd
+    end
+    if o.siegeTarget == "chosenPlayer" then
+        for _, p in ipairs(players) do
+            if p.name == o.siegePlayer then
+                local b = nearest(p)
+                if not b then return nil, p.name .. " has no base" end
+                return b
+            end
+        end
+        return nil, "chosen player is not online"
+    end
+    if #players == 0 then return nil, "no players online" end
+    local owners, home = 0, {}
+    for _, p in ipairs(players) do
+        local b, d = nearest(p)
+        if b then
+            owners = owners + 1
+            if d <= C.SIEGE_NEAR ^ 2 then home[#home + 1] = b end
+        end
+    end
+    if owners == 0 then return nil, "no player owns a base" end
+    if #home == 0 then return nil, "no player is near their base" end
+    return home[rand(#home) + 1]
 end
 
 -- Pure, specs in tests/run.lua. n angles (degrees) round the base: evenly spaced from a random start, each jittered a quarter
@@ -209,17 +249,14 @@ end
 
 -- the base this siege attacks, from siegeTarget; nil and why when none qualifies
 local function pickBase(o)
-    local list = Siege.candidates(SEM.Targets.bases(), o.siegeTarget, o.siegeBase)
-    if #list == 0 then
-        return nil, o.siegeTarget == "chosenBase" and ("no online base called " .. tostring(o.siegeBase)) or "no player base has anyone online"
+    local chosen = o.siegeTarget == "chosenPlayer"
+    local Ta = SEM.Targets
+    local list = {}
+    for _, p in ipairs(chosen and Ta.players() or Ta.eligible(o)) do
+        list[#list + 1] = { name = tostring(p:getUsername()), x = p:getX(), y = p:getY(), on = Ta.onlineOf({ p }) }
     end
-    if o.siegeTarget ~= "chosenBase" then
-        local home = {}
-        for _, b in ipairs(list) do if Spawn.playerNear(b.x, b.y, C.SIEGE_NEAR) then home[#home + 1] = b end end
-        if #home == 0 then return nil, "no player is near a base" end
-        list = home
-    end
-    return list[ZombRand(#list) + 1]
+    if not chosen and #list == 0 and #Ta.players() > 0 then return nil, "no player is at least " .. tostring(o.minAgeDays) .. " days old" end
+    return Siege.choose(o, list, Ta.bases(), ZombRand)
 end
 
 -- Runner calls this as the warning starts (Josh 2026-11-03: players need to see whose base it is before it begins). The base
@@ -270,10 +307,10 @@ function Siege.update(run)
     if d.phase == "attacking" then
         if run.placed and beaten(run) then
             if d.wave >= o.waves then
-                notice(run, "Enemy has been pushed back.")
+                notice(run, "The attackers have been driven off.")
                 return "siege broken, all attackers dead"
             end
-            notice(run, "Enemy are regrouping, heal up and prepare for another wave!")
+            notice(run, "The attackers are regrouping. Patch yourself up, another wave is coming.")
             enter(run, "regroup", o.waveSeconds or (o.waveMinutes or 5) * 60) -- a run saved before waveSeconds has minutes
         end
     elseif run.elapsed >= d.at then

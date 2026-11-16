@@ -3,7 +3,7 @@ SEM = SEM or {}
 require "SEM/Config"
 require "SEM/Options"
 
-local TOWNS = { "Random", "Muldraugh", "West Point", "Riverside", "Rosewood", "March Ridge", "Louisville", "Ekron", "Brandenburg", "Irvington" }
+local TOWNS = { "Muldraugh", "West Point", "Riverside", "Rosewood", "March Ridge", "Louisville", "Ekron", "Brandenburg", "Irvington" }
 local GUARDS = { "none", "zombies", "npc" }
 
 -- D44: random player picks skip characters younger than this
@@ -41,14 +41,15 @@ local function shared(title, message, startMessage, duration)
         { key = "markerExact", type = "bool", default = false, group = "Map marker", showIf = { key = "markerOn", equals = true }, help = "On pins the exact spot. Off shows a circle of the fuzzy radius, so players must search." },
         { key = "markerRadioExact", type = "bool", default = false, group = "Map marker", showIf = { key = "markerOn", equals = true }, help = "Players carrying a charged radio or walkie-talkie see the exact spot as a small marker instead of the circle; everyone else still sees the circle. Checked each time the map opens. The client decides, so a modded client could show it to anyone." },
         { key = "fuzzyRadius", type = "int", min = 10, max = 500, default = 100, group = "Map marker", showIf = { key = "markerExact", equals = false }, help = "Size of the search circle in tiles when the marker is not exact. 100 is a good start." },
-        { key = "locationMode", type = "enum", default = "town", group = "Location", randomFrom = { "town", "countryside", "nearRandomPlayer" }, -- the other modes need extra input
-          choices = { "map", "town", "countryside", "nearRandomPlayer", "nearChosenPlayer", "randomSafehouse", "randomJeemBase" },
-          help = "How the event picks where it happens. Map uses a spot you set, the others choose automatically. Countryside allows fields and roads outside towns." },
+        { key = "locationMode", type = "enum", default = "town", group = "Location", randomFrom = { "countryside", "randomTown", "nearRandomPlayer" }, -- the other modes need extra input
+          choices = { "countryside", "randomTown", "nearRandomPlayer", "town", "nearChosenPlayer", "map" },
+          labels = { countryside = "Random Countryside", randomTown = "Random Town", nearRandomPlayer = "Random Player", town = "Selected Town", nearChosenPlayer = "Selected Player", map = "Selected Location" },
+          help = "How the event picks where it happens. The Random modes choose for you and prefer spots near a road: Random Countryside is open land anywhere on the map away from towns. Selected Town, Selected Player and Selected Location use what you set below." },
         { key = "location", type = "location", optional = true, group = "Location", showIf = { key = "locationMode", equals = "map" }, help = "Exact x, y, z map spot. Leave empty if unsure; Map Pick will fill it later." },
-        { key = "town", type = "enum", noRandom = true, choices = TOWNS, default = "Muldraugh", group = "Location", showIf = { key = "locationMode", equals = "town" }, help = "Town the event happens in. Random picks one each time." },
+        { key = "town", type = "enum", noRandom = true, choices = TOWNS, default = "Muldraugh", group = "Location", showIf = { key = "locationMode", equals = "town" }, help = "Town the event happens in." },
         { key = "chosenPlayer", type = "string", picker = "player", default = "", maxLen = 60, group = "Location", showIf = { key = "locationMode", equals = "nearChosenPlayer" }, help = "The player the event happens near. They must be online when it starts." },
         minAge("Location", { key = "locationMode", equals = "nearRandomPlayer" }),
-        { key = "avoidForest", type = "bool", default = true, group = "Location", showIf = { key = "locationMode", any = { "town", "countryside", "nearRandomPlayer", "nearChosenPlayer" } }, help = "Rejects spots in forest or deep forest. Keep on so events do not land where nobody can reach them." },
+        { key = "avoidForest", type = "bool", default = true, group = "Location", showIf = { key = "locationMode", any = { "countryside", "randomTown", "town", "nearRandomPlayer", "nearChosenPlayer" } }, help = "Rejects spots in forest or deep forest. Keep on so events do not land where nobody can reach them." },
         { key = "durationMinutes", type = "int", min = 1, max = 240, default = duration, group = "General", help = "How long the event stays active before it is cleaned up, in minutes. 30 is typical." },
         { key = "cleanUp", type = "bool", default = false, group = "General", help = "When the event ends or is cancelled, removes what it spawned: crates (full or not), loot on the ground, its zombies, its vehicles nobody is in, and its A-Life NPCs. Anything in ground that is not loaded is removed when a player loads it, for up to 2 hours. Off leaves it all for players." },
     }
@@ -236,8 +237,11 @@ local EventDefs = {
         id = "siege", title = "Under Siege",
         options = add(without(siegeWarning(shared("Under Siege", "Armed groups have been seen moving toward a player base.", "Your base is under attack!", 30)),
             { locationMode = true, location = true, town = true, chosenPlayer = true, minAgeDays = true, avoidForest = true }), {
-            { key = "siegeTarget", type = "enum", noRandom = true, choices = { "random", "randomSafehouse", "randomJeemBase", "chosenBase" }, default = "random", group = "Target", help = "Which base is attacked. Random picks a safehouse or Jeem base. Random choices only pick bases with a player near, so nobody loses a base while away." },
-            { key = "siegeBase", type = "string", picker = "base", default = "", maxLen = 60, group = "Target", showIf = { key = "siegeTarget", equals = "chosenBase" }, help = "The base to attack, from the bases that exist now. The first wave waits until a player is near it." },
+            { key = "siegeTarget", type = "enum", noRandom = true, choices = { "randomPlayer", "chosenPlayer" }, default = "randomPlayer", group = "Target",
+              labels = { randomPlayer = "Random Player", chosenPlayer = "Selected Player" },
+              help = "Whose base is attacked: a safehouse or Jeem base the player owns or belongs to. Random Player only picks a player who is near their base, so nobody loses a base while away." },
+            minAge("Target", { key = "siegeTarget", equals = "randomPlayer" }),
+            { key = "siegePlayer", type = "string", picker = "player", default = "", maxLen = 60, group = "Target", showIf = { key = "siegeTarget", equals = "chosenPlayer" }, help = "The player whose base is attacked, the nearest one to them if they have several. They must be online when it starts. The first wave waits until a player is near the base." },
             { key = "waveType", type = "enum", noRandom = true, choices = { "npc", "zombies", "random" }, default = "npc", group = "Attackers", labels = { npc = "NPC" },
               help = "Who attacks. NPC waves need A-Life, zombie waves do not. Random picks NPC or zombies each run; with no A-Life it picks zombies." },
             { key = "attackers", type = "int", min = 1, max = 10, default = 4, group = "Attackers", showIf = { key = "waveType", any = { "npc", "random" } }, help = "NPCs in each wave, 1 to 10. Needs A-Life." },
@@ -280,7 +284,8 @@ local EventDefs = {
             { startMessage = true, locationMode = true, location = true, town = true, chosenPlayer = true, minAgeDays = true, avoidForest = true, durationMinutes = true,
               markerOn = true, markerExact = true, markerRadioExact = true, fuzzyRadius = true }), {
             { key = "startMessage", type = "string", default = "{player} is being hunted. They always know where {player} is.", maxLen = 200, group = "Announcement", help = "Second notification, sent the moment the hunt starts. {player} becomes the hunted player's name. If you leave it out, the name goes in front." },
-            { key = "huntTarget", type = "enum", noRandom = true, choices = { "randomPlayer", "chosenPlayer" }, default = "randomPlayer", group = "Target", help = "Who is hunted. Random Player picks someone online when the event starts." },
+            { key = "huntTarget", type = "enum", noRandom = true, choices = { "randomPlayer", "chosenPlayer" }, default = "randomPlayer", group = "Target", labels = { randomPlayer = "Random Player", chosenPlayer = "Selected Player" },
+              help = "Who is hunted. Random Player picks someone online when the event starts; Selected Player is the one you name below." },
             minAge("Target", { key = "huntTarget", equals = "randomPlayer" }),
             { key = "huntedPlayer", type = "string", picker = "player", default = "", maxLen = 60, group = "Target", showIf = { key = "huntTarget", equals = "chosenPlayer" }, help = "The player to hunt. They must be online when it starts." },
             { key = "hunters", type = "int", min = 1, max = 10, default = 3, group = "Hunters", help = "NPCs after the player, 1 to 10. Needs A-Life. There is no time limit: it ends when they are dead or the player is. Cancel stops it." },

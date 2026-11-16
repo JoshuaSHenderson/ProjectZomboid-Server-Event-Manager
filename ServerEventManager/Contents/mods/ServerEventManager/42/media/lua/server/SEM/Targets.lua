@@ -39,10 +39,10 @@ function Targets.eligible(o)
     return out
 end
 
--- who is online: { names = set of usernames and A-Life keys, factions = set of vanilla faction names }
-function Targets.online()
+-- who is in list: { names = set of usernames and A-Life keys, factions = set of vanilla faction names }
+function Targets.onlineOf(list)
     local on = { names = {}, factions = {} }
-    for _, p in ipairs(Targets.players()) do
+    for _, p in ipairs(list) do
         on.names[tostring(p:getUsername())] = true
         local key, faction = SEM.Compat_ALife.keyOf(p), SEM.Compat_ALife.factionOf(p)
         if key then on.names[key] = true end
@@ -50,6 +50,8 @@ function Targets.online()
     end
     return on
 end
+
+function Targets.online() return Targets.onlineOf(Targets.players()) end
 
 -- D46. Pure. True when the owner, creator or a member of base b is online. A base that names nobody cannot be ruled out.
 function Targets.baseOnline(b, on)
@@ -64,12 +66,6 @@ local function mark(list)
     local on = Targets.online()
     for _, b in ipairs(list) do b.offline = not Targets.baseOnline(b, on) end
     return list
-end
-
-local function online(list)
-    local out = {}
-    for _, b in ipairs(list) do if not b.offline then out[#out + 1] = b end end
-    return out
 end
 
 -- every safehouse: { id, owner, members, x, y, w, h, offline }; x, y is its centre
@@ -135,40 +131,67 @@ function Targets.inMap(x, y)
     return not ok or d ~= nil
 end
 
--- Moves (x,y) out of every zone ({ x1, y1, x2, y2 }) that holds it: just past the nearest edge, plus pad. A point in no zone
--- stays. Pure. Overlapping zones may need a few moves; after 8 the point is returned as it is.
-function Targets.outside(zones, x, y, pad)
-    for _ = 1, 8 do
-        local z
-        for _, c in ipairs(zones) do
-            if x >= c.x1 and x <= c.x2 and y >= c.y1 and y <= c.y2 then z = c break end
+-- Minimum Distance From Players (limits.playerDistance); the default when the store is not there (specs)
+local function distance()
+    local l = SEM.Store and SEM.Store.config and SEM.Store.config.limits
+    return l and l.playerDistance or C.PLAYER_DISTANCE
+end
+
+-- fn(x, y): true when (x, y) is at least d tiles from every online player. Takes the player list once.
+local function farFrom(d)
+    local list = Targets.players()
+    return function(x, y)
+        for _, p in ipairs(list) do
+            if (p:getX() - x) ^ 2 + (p:getY() - y) ^ 2 < d * d then return false end
         end
-        if not z then return x, y end
-        local l, r, u, d = x - z.x1, z.x2 - x, y - z.y1, z.y2 - y
-        local m = math.min(l, r, u, d)
-        if m == l then x = z.x1 - 1 - pad
-        elseif m == r then x = z.x2 + 1 + pad
-        elseif m == u then y = z.y1 - 1 - pad
-        else y = z.y2 + 1 + pad end
+        return true
     end
-    return x, y
 end
 
--- a base or safehouse centre lies inside its own protected zone, where nothing can be placed; an event that keeps out of
--- protected ground is aimed just outside it instead (an event with respectProtected false keeps the centre)
-local function clear(p, o)
-    if o.respectProtected == false then return p end
-    p.x, p.y = Targets.outside(SEM.Safety.zones(), p.x, p.y, C.PROTECT_PAD)
-    return p
+-- true when a road zone lies at (x, y), or at 8 compass probes C.ROAD_REACH away, or 8 more at half that. The metagrid
+-- answers for unloaded ground (see classAt), so this works where no player has been.
+function Targets.nearRoad(x, y)
+    if Targets.classAt(x, y) == "road" then return true end
+    for _, reach in ipairs({ C.ROAD_REACH, math.floor(C.ROAD_REACH / 2) }) do
+        for dx = -1, 1 do
+            for dy = -1, 1 do
+                if (dx ~= 0 or dy ~= 0) and Targets.classAt(x + dx * reach, y + dy * reach) == "road" then return true end
+            end
+        end
+    end
+    return false
 end
 
--- random point at distance lo..hi from (cx,cy), first one whose class suits the mode
-local function ring(cx, cy, lo, hi, tries, mode, avoid, b)
+-- up to tries points from sample() -> x, y that pass ok(x, y): the first one near a road wins; with none, the first
+-- plain one (a missing road never fails a search)
+local function search(tries, sample, ok)
+    local plain
     for _ = 1, tries do
-        local a, d = math.rad(ZombRand(360)), lo + ZombRand(hi - lo + 1)
-        local x, y = math.floor(cx + math.cos(a) * d), math.floor(cy + math.sin(a) * d)
-        if Targets.inMap(x, y) and Sites.allowed(Targets.classAt(x, y), mode, avoid) then return { x = x, y = y, z = 0 } end
+        local x, y = sample()
+        if ok(x, y) then
+            if Targets.nearRoad(x, y) then return { x = x, y = y, z = 0 } end
+            plain = plain or { x = x, y = y, z = 0 }
+        end
     end
+    return plain
+end
+
+-- random point at distance lo..hi from (cx,cy) whose class suits the mode; far(x, y), when given, must hold too
+local function ring(cx, cy, lo, hi, tries, mode, avoid, far)
+    return search(tries, function()
+        local a, d = math.rad(ZombRand(360)), lo + ZombRand(hi - lo + 1)
+        return math.floor(cx + math.cos(a) * d), math.floor(cy + math.sin(a) * d)
+    end, function(x, y)
+        return (not far or far(x, y)) and Targets.inMap(x, y) and Sites.allowed(Targets.classAt(x, y), mode, avoid)
+    end)
+end
+
+-- true when (x, y) is within pad tiles of a town's radius
+local function inTown(x, y, pad)
+    for _, t in pairs(C.TOWNS) do
+        if (x - t.x) ^ 2 + (y - t.y) ^ 2 <= (t.r + pad) ^ 2 then return true end
+    end
+    return false
 end
 
 local mode = {}
@@ -179,8 +202,8 @@ function mode.map(o)
     return { x = l.x, y = l.y, z = l.z or 0 }
 end
 
-function mode.town(o)
-    local name = o.town
+-- a random point in the named town; "Random" (also what an old save holds) picks the town. Keeps off players when it can.
+local function townSpot(o, name)
     if name == "Random" then
         local names = {}
         for n in pairs(C.TOWNS) do names[#names + 1] = n end
@@ -189,9 +212,20 @@ function mode.town(o)
     end
     local t = C.TOWNS[name]
     if not t then return nil, "unknown town " .. tostring(name) end
-    local b = Targets.bounds()
-    local p = ring(t.x, t.y, 0, t.r, 50, "town", o.avoidForest, b)
+    local function try(far) return ring(t.x, t.y, 0, t.r, 50, "town", o.avoidForest, far) end
+    local p = try(farFrom(distance())) or try(nil)
     if not p then return nil, "no suitable spot in " .. name end
+    return p
+end
+
+function mode.town(o) return townSpot(o, o.town) end
+function mode.randomTown(o) return townSpot(o, "Random") end
+
+-- ring D..D + 60 round (cx, cy), at least D from every player
+local function nearPlayer(o, cx, cy, kind)
+    local d = distance()
+    local p = ring(cx, cy, d, d + 60, 30, kind, o.avoidForest, farFrom(d))
+    if not p then return nil, "no suitable spot near player" end
     return p
 end
 
@@ -209,34 +243,14 @@ function mode.nearRandomPlayer(o, anchor)
     else
         return nil, "no players online"
     end
-    return ring(cx, cy, 40, 100, 30, "nearRandomPlayer", o.avoidForest, Targets.bounds()) or nil, "no suitable spot near player"
+    return nearPlayer(o, cx, cy, "nearRandomPlayer")
 end
 
 function mode.nearChosenPlayer(o)
     for _, pl in ipairs(Targets.players()) do
-        if pl:getUsername() == o.chosenPlayer then
-            return ring(pl:getX(), pl:getY(), 40, 100, 30, "nearChosenPlayer", o.avoidForest, Targets.bounds()) or nil, "no suitable spot near player"
-        end
+        if pl:getUsername() == o.chosenPlayer then return nearPlayer(o, pl:getX(), pl:getY(), "nearChosenPlayer") end
     end
     return nil, "chosen player is not online"
-end
-
-function mode.randomSafehouse(o)
-    local all = Targets.safehouses()
-    if #all == 0 then return nil, "no safehouses exist" end
-    local list = online(all)
-    if #list == 0 then return nil, "no safehouse has anyone online" end
-    local s = pick(list)
-    return clear({ x = s.x, y = s.y, z = 0 }, o)
-end
-
-function mode.randomJeemBase(o)
-    local all = Targets.jeem()
-    if not all or #all == 0 then return nil, "no Jeem bases (Project A-Life Jimmy not loaded or none exist)" end
-    local bases = online(all)
-    if #bases == 0 then return nil, "no Jeem base has anyone online" end
-    local b = pick(bases)
-    return clear({ x = b.x, y = b.y, z = b.z or 0 }, o)
 end
 
 -- Pure. The box around every area { id, x1, y1, x2, y2 } of one base id, or nil when it has none
@@ -251,7 +265,7 @@ function Targets.unionRect(areas, id)
     return r
 end
 
--- every base that exists now: { id, label, kind, x, y, rect, offline }. kind = safehouse, jeem or home. id is what Horde and Siege
+-- every base that exists now: { id, label, kind, x, y, rect, offline, owner, ownerKind, createdBy, members }. kind = safehouse, jeem or home. id is what Horde and Siege
 -- look a base up by; the console shows this list in its base picker. rect = { x1, y1, x2, y2 } when known (a home has none).
 function Targets.bases()
     local out = {}
@@ -261,12 +275,14 @@ function Targets.bases()
             local x1, y1 = s.x - math.floor(s.w / 2), s.y - math.floor(s.h / 2) -- x, y is the centre
             rect = { x1 = x1, y1 = y1, x2 = x1 + s.w - 1, y2 = y1 + s.h - 1 }
         end
-        out[#out + 1] = { id = s.id, label = s.id .. " (" .. s.owner .. ")", kind = "safehouse", x = s.x, y = s.y, rect = rect, offline = s.offline }
+        out[#out + 1] = { id = s.id, label = s.id .. " (" .. s.owner .. ")", kind = "safehouse", x = s.x, y = s.y, rect = rect, offline = s.offline,
+            owner = s.owner, members = s.members }
     end
     local areas = SEM.Compat_ALife.baseAreas()
     for _, b in ipairs(Targets.jeem() or {}) do
         out[#out + 1] = { id = tostring(b.id), label = "Jeem base " .. tostring(b.id), kind = "jeem", x = b.x, y = b.y,
-            rect = Targets.unionRect(areas, tostring(b.id)), offline = b.offline }
+            rect = Targets.unionRect(areas, tostring(b.id)), offline = b.offline,
+            owner = b.owner, ownerKind = b.ownerKind, createdBy = b.createdBy }
     end
     for _, h in ipairs(Targets.homes() or {}) do
         out[#out + 1] = { id = h.id, label = "A-Life home " .. h.id, kind = "home", x = h.x, y = h.y, offline = h.offline }
@@ -274,28 +290,27 @@ function Targets.bases()
     return out
 end
 
--- anchor as in nearRandomPlayer: with everyone offline the search runs around where a player stood at the announcement (D16)
-function mode.countryside(o, anchor)
-    local list = Targets.players() -- Minimum Age does not apply here
-    if #list == 0 and not anchor then return nil, "no players online to search around" end
-    local b = Targets.bounds()
-    for _ = 1, C.SAMPLES do
-        local cx, cy
-        if #list > 0 then
-            local pl = pick(list)
-            cx, cy = pl:getX(), pl:getY()
-        else
-            cx, cy = anchor.x, anchor.y
-        end
-        local p = ring(cx, cy, C.RING_MIN, C.RING_MAX, 1, "countryside", true, b)
-        if p then return p end
-    end
-    return nil, "no open countryside found"
+-- Anywhere on the map, not round a player. A server has no usable map bounds and the far bank has no roads, so points are
+-- sampled COUNTRY_MIN..COUNTRY_MAX tiles from a random town, outside every town and PLAYER_DISTANCE from every player.
+function mode.countryside()
+    local names, far = {}, farFrom(distance())
+    for n in pairs(C.TOWNS) do names[#names + 1] = n end
+    table.sort(names)
+    local p = search(C.SAMPLES, function()
+        local t = C.TOWNS[pick(names)]
+        local lo = t.r + C.COUNTRY_MIN
+        local a, d = math.rad(ZombRand(360)), lo + ZombRand(C.COUNTRY_MAX - lo + 1)
+        return math.floor(t.x + math.cos(a) * d), math.floor(t.y + math.sin(a) * d)
+    end, function(x, y)
+        return not inTown(x, y, 50) and far(x, y) and Targets.inMap(x, y) and Sites.allowed(Targets.classAt(x, y), "countryside", true)
+    end)
+    if not p then return nil, "no open countryside found" end
+    return p
 end
 
 -- modes that pick a fresh random point each call, so asking again can find a better one; map, safehouse and base
 -- modes name one place, which a class preference never overrides
-local RANDOM_MODES = { town = true, countryside = true, nearRandomPlayer = true, nearChosenPlayer = true }
+local RANDOM_MODES = { town = true, randomTown = true, countryside = true, nearRandomPlayer = true, nearChosenPlayer = true }
 Targets.RANDOM_MODES = RANDOM_MODES
 
 -- Keeps first when it is of the preferred class, else asks sample() up to tries times for a point of that class and falls
@@ -376,17 +391,9 @@ function Targets.strikeSite(site)
     w.siteStrikes[key] = (w.siteStrikes[key] or 0) + 1
 end
 
--- where the mode aims: cx, cy, lo, hi, player name; or nil
+-- where a player mode aims: cx, cy, lo, hi, player name; or nil
 local function aim(o, anchor)
-    if o.locationMode == "countryside" then
-        local list = Targets.players()
-        if #list > 0 then
-            local pl = pick(list)
-            return pl:getX(), pl:getY(), C.RING_MIN, C.RING_MAX, tostring(pl:getUsername())
-        end
-        if anchor then return anchor.x, anchor.y, C.RING_MIN, C.RING_MAX, "anchor" end
-        return nil
-    end
+    local d = distance()
     local pl
     if o.locationMode == "nearChosenPlayer" then
         for _, p in ipairs(Targets.players()) do if p:getUsername() == o.chosenPlayer then pl = p end end
@@ -394,26 +401,36 @@ local function aim(o, anchor)
         local list = Targets.eligible(o)
         if #list > 0 then pl = pick(list) end
     end
-    if pl then return pl:getX(), pl:getY(), 40, 100, tostring(pl:getUsername()) end
-    if o.locationMode == "nearRandomPlayer" and anchor and #Targets.players() == 0 then return anchor.x, anchor.y, 40, 100, "anchor" end
+    if pl then return pl:getX(), pl:getY(), d, d + 60, tostring(pl:getUsername()) end
+    if o.locationMode == "nearRandomPlayer" and anchor and #Targets.players() == 0 then return anchor.x, anchor.y, d, d + 60, "anchor" end
 end
 
--- Crash with useSiteList in a random-player mode: a listed or learned site, or nil (the normal random flow then runs)
+-- Crash with useSiteList in a random-player mode: a listed or learned site, or nil (the normal random flow then runs).
+-- Countryside is not tied to a player: any site outside the towns and PLAYER_DISTANCE from every player, near a road if one is.
 function Targets.siteFromList(o, anchor, run)
-    local cx, cy, lo, hi, who = aim(o, anchor)
+    local land = o.locationMode == "countryside"
+    local cx, cy, lo, hi, who
+    if land then cx, cy, lo, hi, who = 0, 0, 0, math.huge, "anywhere" else cx, cy, lo, hi, who = aim(o, anchor) end
     if not cx then return nil end
     local w = world()
     local builtIn = require("SEM/CrashSites")
     local all = {}
     for _, s in ipairs(builtIn) do all[#all + 1] = s end
     for _, s in ipairs(w and w.learnedSites or {}) do all[#all + 1] = s end
-    local s, d = Targets.pickSite(all, cx, cy, lo, hi, o.aircraft, {
-        recent = w and w.recentSites or {}, strikes = w and w.siteStrikes or {}, maxRange = C.SITE_MAX_RANGE, spacing = C.SITE_SPACING,
-        maxStrikes = C.SITE_STRIKES, rand = ZombRand,
-        blocked = o.respectProtected ~= false and SEM.Safety.isProtected or nil,
-    })
+    local far = farFrom(distance())
+    local function pickWith(extra)
+        return Targets.pickSite(all, cx, cy, lo, hi, o.aircraft, {
+            recent = w and w.recentSites or {}, strikes = w and w.siteStrikes or {}, maxRange = land and math.huge or C.SITE_MAX_RANGE, spacing = C.SITE_SPACING,
+            maxStrikes = C.SITE_STRIKES, rand = ZombRand,
+            blocked = function(x, y)
+                return (o.respectProtected ~= false and SEM.Safety.isProtected(x, y)) or (land and (inTown(x, y, 0) or not far(x, y) or (extra and extra(x, y)))) or false
+            end,
+        })
+    end
+    local s, d = pickWith(land and function(x, y) return not Targets.nearRoad(x, y) end)
+    if not s and land then s, d = pickWith() end
     if not s then
-        if run and SEM.Runner then SEM.Runner.warn(run, "site list: no site within " .. C.SITE_MAX_RANGE .. " tiles, using a random spot") end
+        if run and SEM.Runner then SEM.Runner.warn(run, land and "site list: no site fits, using a random spot" or ("site list: no site within " .. C.SITE_MAX_RANGE .. " tiles, using a random spot")) end
         return nil
     end
     if w then
@@ -423,7 +440,7 @@ function Targets.siteFromList(o, anchor, run)
     local builtin = false
     for _, b in ipairs(builtIn) do if b == s then builtin = true break end end
     if run and SEM.Runner then
-        SEM.Runner.log(run, "site list: " .. s.x .. "," .. s.y .. " r=" .. s.r .. " (" .. (builtin and "builtin" or "learned") .. ") " .. math.floor(d) .. " tiles from " .. who)
+        SEM.Runner.log(run, "site list: " .. s.x .. "," .. s.y .. " r=" .. s.r .. " (" .. (builtin and "builtin" or "learned") .. ") " .. (land and "countryside" or (math.floor(d) .. " tiles from " .. who)))
     end
     return { x = s.x, y = s.y, z = 0, site = { x = s.x, y = s.y } }
 end

@@ -12,6 +12,7 @@ local KILL_SIZE, KILL_RANGE, HEAD = 32, 40, 1.15 -- pixels; tiles, zombies only;
 local tagged = {} -- online id -> SEMType, from the server
 local NPC = { HostileNpc = "kill", FriendlyNpc = "friend" }
 local marks = {}
+local seen, seenAt = {}, 0 -- { z, id, kind } for the tagged zombies in the cell; the cell walk is dear, so it runs every 250 ms
 
 local function mark(name)
     if marks[name] == nil then marks[name] = getTexture("media/ui/SEM/" .. name .. ".png") or false end
@@ -59,15 +60,27 @@ local function arrow(i)
 end
 
 -- SEMType reaches the client here, since modData does not sync: each spawned zombie or NPC in the cell gets it set on first sight
-local function drawTags(px, py, pz, three)
-    if SEM.empty(tagged) then return end
+local function rescan()
+    seen, seenAt = {}, getTimestampMs()
     local list = getCell():getZombieList()
     for i = 0, list:size() - 1 do
         local z = list:get(i)
-        local kind = tagged[z:getOnlineID()]
+        local id = z:getOnlineID()
+        local kind = tagged[id]
         if kind and not z:isDead() then
             local md = z:getModData()
             if md.SEMType ~= kind then md.SEMType = kind end
+            seen[#seen + 1] = { z = z, id = id, kind = kind }
+        end
+    end
+end
+
+local function drawTags(px, py, pz, three)
+    if SEM.empty(tagged) then return end
+    if getTimestampMs() - seenAt >= 250 then rescan() end
+    for _, t in ipairs(seen) do
+        local z, kind = t.z, t.kind
+        if not z:isDead() and z:getOnlineID() == t.id then -- engine objects are reused
             local x, y, zz = z:getX(), z:getY(), z:getZ()
             -- NPCs always show, walls or not, until their event ends; zombies only when near and in sight
             local show = NPC[kind] ~= nil
@@ -113,7 +126,7 @@ local function render()
             local ax, ay = cx + math.cos(a) * RING, cy + math.sin(a) * RING
             local tex = arrow(i)
             if tex then UIManager.DrawTexture(tex, ax - SIZE / 2, ay - SIZE / 2, SIZE, SIZE, 0.95) end
-            tm:DrawStringCentre(UIFont.Small, ax, ay + SIZE / 2, #r.points .. " " .. r.noun .. ", " .. math.floor(d) .. " tiles", 1, 0.8, 0.3, 1)
+            tm:DrawStringCentre(UIFont.Small, ax, ay + SIZE / 2, #r.points .. " " .. r.noun .. ", " .. math.floor(d) .. " tiles", 1, 1, 1, 1)
         end
     end
 end
@@ -131,7 +144,7 @@ Events.OnServerCommand.Add(function(module, command, args)
     for _, kind in ipairs({ "HostileZombie", "HostileNpc", "FriendlyNpc" }) do
         for _, id in ipairs(args[kind] or {}) do new[id] = kind end
     end
-    tagged = new
+    tagged, seenAt = new, 0 -- seenAt 0: rescan on the next frame
 end)
 
 Events.OnServerCommand.Add(function(module, command, args)

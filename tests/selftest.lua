@@ -452,7 +452,8 @@ local function run()
     R.pollNow()
     check("nearRandomPlayer carries on", ar and ar.state, "active")
     local ad = ar and ar.x and math.sqrt((ar.x - 10770) ^ 2 + (ar.y - 10000) ^ 2) or -1
-    check("site 40 to 100 tiles from the anchor (target before findSquare)", ad >= 39 and ad <= 101, true)
+    local pd = Store.config.limits.playerDistance
+    check("site D to D + 60 tiles from the anchor (target before findSquare)", ad >= pd - 1 and ad <= pd + 61, true)
     check("horde carries on", hz and hz.state, "active")
     check("horde waits for a player", hz and hz.status, "Waiting for a player to reach the start")
     local ap, awhy = SEM.Targets.resolve({ locationMode = "nearRandomPlayer", avoidForest = false }, nil, nil)
@@ -727,7 +728,14 @@ local function run()
     getOnlinePlayers = noPlayers
     local cp = SEM.Targets.resolve({ locationMode = "countryside" }, nil, { x = 10770, y = 10000 })
     getOnlinePlayers = stubPlayers
-    check("countryside with nobody online uses the anchor", cp ~= nil, true)
+    check("countryside with nobody online needs no player or anchor", cp ~= nil, true)
+    -- road zones answer for ground nobody has loaded (the metagrid, not squares), so nearRoad can be asked anywhere
+    local nr = 0
+    for _ = 1, 20 do
+        local rp = SEM.Targets.resolve({ locationMode = "countryside" })
+        if rp and SEM.Targets.nearRoad(rp.x, rp.y) then nr = nr + 1 end
+    end
+    print("[SEM-TEST] info countryside spots near a road " .. nr .. " of 20")
     local exists = function(i) return getScriptManager():FindItem(i) ~= nil end
     local rolled = SEM.Spawn.rollCrate({ { item = "Base.Axe", chance = 0, min = 0, max = 0 } }, ZombRand, exists)
     check("empty roll gets one real item", rolled[1] and rolled[1].item .. rolled[1].count, "Base.Axe1")

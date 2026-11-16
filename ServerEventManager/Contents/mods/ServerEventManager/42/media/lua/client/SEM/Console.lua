@@ -41,6 +41,8 @@ local LIMITS = {
       help = "Most zombies any single event may spawn, whatever its own settings say. 200 is safe for most servers." },
     { key = "maxConcurrent", type = "int", min = 1, max = 5, default = 2, group = "Limits",
       help = "How many scheduled events may run at once; more wait in a queue. Forced events are not counted. 2 keeps the server calm; more adds load." },
+    { key = "playerDistance", type = "int", min = 20, max = 300, default = 60, group = "Limits",
+      help = "Closest an event at a location may appear to any player, in tiles. Random Player and Selected Player place it between this and 60 tiles further from the chosen player. Applies to every random location, never to Selected Location." },
 }
 -- the pages under the event list: schema pages validate through Options, keyed "<page>.<field>"
 local PAGES = { limits = LIMITS }
@@ -143,7 +145,7 @@ function Console:initialise()
     ISPanel.initialise(self)
     metrics()
     local w, h = self.width, self.height
-    self.closeBtn = T.btn("X", w - 40, 9, 30, nil, function() Console.hide() end)
+    self.closeBtn = T.iconBtn("media/ui/inventoryPanes/Button_Close.png", 6, math.floor((HDR - BH) / 2), BH, nil, function() Console.hide() end)
     self.copyBtn = T.btn("Copy", RAIL + 16, h - 34, 0, self, function() SEM.ConfigPage.onCopy(self) end)
     self.pasteBtn = T.btn("Paste", RAIL + 16, h - 34, 0, self, function() SEM.ConfigPage.onPaste(self) end)
     self.reloadBtn = T.btn("Reload", RAIL + 16, h - 34, 0, self, function() SEM.ConfigPage.onReload(self) end)
@@ -196,7 +198,7 @@ function Console:layout()
     metrics()
     local w, h = self.width, self.height
     local by = h - BH - 12
-    self.closeBtn:setX(w - 40)
+    self.closeBtn:setX(6)
     self.closeBtn:setY(math.floor((HDR - BH) / 2))
     for _, b in ipairs({ self.copyBtn, self.pasteBtn, self.reloadBtn, self.saveBtn, self.saveAsBtn, self.dupBtn, self.cancelBtn, self.delBtn, self.forceBtn }) do b:setY(by) end
     self.forceBtn:setX(w - FEED - 16 - self.forceBtn:getWidth())
@@ -233,7 +235,8 @@ function Console:syncDrafts(ack)
     if p and p.after then p.after() end
     -- the schedule table shows snapshot data; an open schedule edit form is kept. The preset selector is
     -- rebuilt when the event's list of presets changed.
-    local rebuild = (self.sel == "scheduler" and not self.edit) or (self.def ~= nil and Presets.key(self.sel) ~= self.listKey)
+    -- (only when the schedule data changed: a status change elsewhere must not tear the tick boxes down)
+    local rebuild = (self.sel == "scheduler" and not self.edit and not F.eq(cfg.schedules or {}, self.schedSeen or false)) or (self.def ~= nil and Presets.key(self.sel) ~= self.listKey)
     if p and p.edit and p.edit == self.edit then
         self:closeEdit()
         rebuild = false -- closeEdit rebuilt the view
@@ -341,6 +344,10 @@ function Console:build()
     if self.view then self:removeChild(self.view) end
     self.view, self.form, self.sBtns, self.nameBox, self.builtKey, self.cfgBox = nil, nil, nil, nil, key, nil
     local d = self:cur()
+    if self.sel == "scheduler" and not self.edit then
+        local cfg = Net.snapshot and Net.snapshot.config
+        self.schedSeen = type(cfg) == "table" and F.copy(cfg.schedules or {}) or nil -- a copy: later snapshots are compared against what is on screen
+    end
     if self.sel == "home" then
         self.view = SEM.Welcome.build(self, viewRect(self))
         if keep then self.view:setYScroll(keep) end
@@ -624,6 +631,13 @@ function Console:drawRail()
     local c, fh = T.c, T.fh()
     local snap = Net.snapshot or {}
     local top, headH, pageH = HDR + 1, fh + 8, math.max(28, fh + 14)
+    local now = getTimestampMs()
+    if not self.marks or now - (self.marksAt or 0) >= 250 then -- unsaved marks: deep compares are too dear for every frame
+        local m = {}
+        for _, d in ipairs(SEM.EventDefs) do m[d.id] = not F.eq(self.drafts[d.id], self.base[d.id]) end
+        for _, p in ipairs(RAIL_PAGES) do m[p.id] = not F.eq(self.drafts[p.id], self.base[p.id]) end
+        self.marks, self.marksAt = m, now
+    end
     local items, y = {}, 6
     local modded = false -- a registered event is listed once the server has its settings, so a server without its mod shows none
     local function shown(d) return not d.modded or ((snap.config or {}).events or {})[d.id] ~= nil end
@@ -656,9 +670,8 @@ function Console:drawRail()
             T.text(self, it.head, 14, iy + 4, c.dim)
         elseif it.ev then
             local d = it.ev
-            local b = self.base[d.id]
             if d.id == self.sel then T.rect(self, 1, iy, RAIL - 2, ROW - 4, c.sel) end
-            local mark = F.eq(self.drafts[d.id], b) and "" or " *"
+            local mark = self.marks[d.id] and " *" or ""
             T.text(self, d.title .. mark, 14, iy + 4, d.id == self.sel and c.hot or c.amber)
             local st = F.status(d.id, usedBySchedule(d.id), snap.runs)
             T.pill(self, RAIL - T.tw(st) - 24, iy + 3, st, c[PILL[st]], st == "WARNING" or st == "LIVE")
@@ -667,7 +680,7 @@ function Console:drawRail()
             local p = it.page
             local on = self.sel == p.id
             if on then T.rect(self, 1, iy, RAIL - 2, pageH, c.sel) end
-            local mark = F.eq(self.drafts[p.id], self.base[p.id]) and "" or " *"
+            local mark = self.marks[p.id] and " *" or ""
             T.text(self, SEM.t(p.id, p.title) .. mark, 14, iy + 6, on and c.hot or c.amber)
             self.railHits[#self.railHits + 1] = { id = p.id, y = iy, h = pageH }
         end
@@ -701,13 +714,14 @@ end
 -- the walkthrough box and anything else on top (Josh 2026-11-03)
 function Console:drawFrame()
     local c, w, h = T.c, self.width, self.height
-    T.rect(self, 1, 1, w - 2, HDR - 1, c.panel)
+    T.titleBar(self, 1, 1, w - 2, HDR - 1)
     T.rect(self, 0, HDR, w, 1, c.line)
-    T.text(self, SEM.t("title", "Server Event Manager"), 14, (HDR - T.fh(T.font.med)) / 2, c.amber, T.font.med)
+    local title = SEM.t("title", "Server Event Manager")
+    T.text(self, title, (w - T.tw(title, T.font.med)) / 2, (HDR - T.fh(T.font.med)) / 2, c.amber, T.font.med)
     local clock, srv = Net.clock()
     local so, co = Net.offsets()
     local yours = srv and so and " (YOURS " .. F.clockText(F.localClock(clock, so, co)) .. ")" or ""
-    T.textRight(self, (srv and "SERVER " or "CLIENT ") .. F.clockText(clock) .. yours, w - 52, (HDR - T.fh()) / 2, c.hot)
+    T.textRight(self, (srv and "SERVER " or "CLIENT ") .. F.clockText(clock) .. yours, w - 12, (HDR - T.fh()) / 2, c.hot)
     T.rect(self, RAIL, HDR, 1, h - HDR, c.line)
     self:drawRail()
     T.rect(self, w - FEED, HDR, 1, h - HDR, c.line)

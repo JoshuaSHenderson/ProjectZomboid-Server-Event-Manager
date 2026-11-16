@@ -11,7 +11,7 @@ local T, Walk = SEM.Theme, SEM.Walkthrough
 local W = {}
 SEM.Welcome = W
 
-local ASK = "Welcome to the Server Event Manager, Would you like to run the walkthrough?"
+local ASK = "Welcome to the Server Event Manager. Would you like to run the walkthrough?"
 
 -- c is the console; returns the scroller (already a child of c) at the given rectangle
 function W.build(c, x, y, w, h)

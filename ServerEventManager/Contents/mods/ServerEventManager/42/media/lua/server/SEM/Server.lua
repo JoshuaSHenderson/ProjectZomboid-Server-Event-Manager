@@ -286,7 +286,19 @@ end
 
 local public = {}
 
+-- ponytail: one reply set per player per window; whole table cleared past 200 names, so a spammer at worst gets one extra answer
+SEM.HELLO_EVERY_MS = 2000
+local helloAt, helloN = {}, 0
+
 function public.hello(player)
+    local who, nowMs = name(player), getTimestampMs()
+    local last = helloAt[who]
+    if last and nowMs >= last and nowMs - last < SEM.HELLO_EVERY_MS then return end
+    if not last then
+        if helloN >= 200 then helloAt, helloN = {}, 0 end
+        helloN = helloN + 1
+    end
+    helloAt[who] = nowMs
     sendServerCommand(player, MODULE, "markerState", { markers = SEM.Runner.markers() })
     if SEM.isAdmin(player) then sendServerCommand(player, MODULE, "markerExactState", { dots = SEM.Runner.exactDots() }) end
     sendServerCommand(player, MODULE, "superState", SEM.Events.super.marks())

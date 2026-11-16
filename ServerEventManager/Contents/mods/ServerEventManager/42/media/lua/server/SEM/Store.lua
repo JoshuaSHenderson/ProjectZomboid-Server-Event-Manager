@@ -19,6 +19,8 @@ Store.limitsSchema = {
       help = "Most zombies any single event may spawn, whatever its own settings say. 200 is safe for most servers." },
     { key = "maxConcurrent", type = "int", min = 1, max = 5, default = C.MAX_CONCURRENT,
       help = "How many scheduled events may run at once; more wait in a queue. Forced events are not counted. 2 keeps the server calm; more adds load." },
+    { key = "playerDistance", type = "int", min = 20, max = 300, default = C.PLAYER_DISTANCE,
+      help = "Closest an event at a location may appear to any player, in tiles. Random Player and Selected Player place it between this and 60 tiles further from the chosen player. Applies to every random location, never to Selected Location." },
 }
 
 local scheduleSchema = {
@@ -212,6 +214,8 @@ end
 -- one step per schema bump, each run on a config saved before it (no schema means 1). Schema 2: Convoy lost its "none" guard type.
 -- Schema 3: lootPack and vehiclePack hold a list of pack names, "" becomes empty. Schema 4: Siege waveMinutes became waveSeconds. Schema 6: guardMin and guardMax became guardNpcMin and guardNpcMax.
 -- Schema 5 (D56): Horde targetType keeps location, random, randomTown, randomCountryside and randomPlayer; any other value becomes randomPlayer.
+-- Schema 8: locationMode randomTown came in (town "Random" became it) and randomSafehouse and randomJeemBase went (now nearRandomPlayer);
+-- Siege siegeTarget is randomPlayer or chosenPlayer and siegeBase is gone. It runs after the from < 5 step, which touches Horde only.
 function Store.migrate(cfg)
     local from = cfg.schema or 1
     local function each(fix)
@@ -253,6 +257,18 @@ function Store.migrate(cfg)
         local keep = { location = true, random = true, randomTown = true, randomCountryside = true, randomPlayer = true }
         each(function(o, id)
             if type(o) == "table" and id == "horde" and o.targetType ~= nil and not keep[o.targetType] then o.targetType = "randomPlayer" end
+        end)
+    end
+    if from < 8 then
+        local oldBase = { random = true, randomSafehouse = true, randomJeemBase = true, chosenBase = true }
+        each(function(o, id)
+            if type(o) ~= "table" then return end
+            if o.locationMode == "town" and o.town == "Random" then o.locationMode, o.town = "randomTown", "Muldraugh" end
+            if o.locationMode == "randomSafehouse" or o.locationMode == "randomJeemBase" then o.locationMode = "nearRandomPlayer" end
+            if id == "siege" then
+                if oldBase[o.siegeTarget] then o.siegeTarget = "randomPlayer" end
+                o.siegeBase = nil -- unknown keys fail validation on import
+            end
         end)
     end
 end
