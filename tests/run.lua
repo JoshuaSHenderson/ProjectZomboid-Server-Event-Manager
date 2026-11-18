@@ -3743,6 +3743,18 @@ t("siege picks a base through its player", function()
     check("home never matches", #S2.candidates({ bases[3] }, S2.owns(on("ann"))), 0)
     check("a member counts", #S2.candidates({ bases[5] }, S2.owns(on("cy"))), 1)
     check("a faction base counts", #S2.candidates({ { id = "f", kind = "safehouse", ownerKind = "faction", owner = "Crew" } }, S2.owns({ names = {}, factions = { Crew = true } })), 1)
+    local nested = { { id = "s", kind = "safehouse", owner = "ann", x = 10, y = 10 },
+        { id = "jb", kind = "jeem", owner = "zed", x = 0, y = 0, rect = { x1 = -20, y1 = -20, x2 = 20, y2 = 20 } } }
+    local inJ = S2.candidates(nested, S2.owns(on("ann")))
+    check("safehouse in a Jeem base becomes it", inJ[1] and inJ[1].id, "jb")
+    check("listed once", #S2.candidates(nested, S2.owns(on("ann", "zed"))), 1)
+    local r = { x1 = -100, y1 = -20, x2 = 99, y2 = 19 }
+    check("edge east", S2.edge(0, 0, r, 0), 100)
+    check("edge west", math.floor(S2.edge(0, 0, r, math.pi) + 0.5), 100)
+    check("edge north", math.floor(S2.edge(0, 0, r, -math.pi / 2) + 0.5), 20)
+    check("edge diagonal hits the short side", math.floor(S2.edge(0, 0, r, math.pi / 4) * math.sin(math.pi / 4) + 0.5), 20)
+    check("edge no rect", S2.edge(0, 0, nil, 0), 0)
+    check("edge outside rect", S2.edge(500, 0, r, 0), 0)
     local function pl(name, x, y, ...) return { name = name, x = x, y = y, on = on(name, ...) } end
     local first = function() return 0 end
     local b = S2.choose({ siegeTarget = "chosenPlayer", siegePlayer = "ann" }, { pl("ann", 40, 0) }, bases, first)

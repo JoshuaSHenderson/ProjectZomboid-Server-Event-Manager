@@ -19,11 +19,25 @@ SEM.Events.siege = Siege
 Siege.ownSite = true -- no location options; start picks the base
 Siege.timeUpFails = true -- D42: a wave that never dies is a lost siege
 
--- Pure, specs in tests/run.lua. The bases owns(b) accepts; A-Life homes never count, a siege needs a claimed base
+-- the Jeem base whose rect holds safehouse b's centre, or nil. Waves spawn outside protected ground, so a safehouse inside
+-- a Jeem base leaves them nowhere to stand; the Jeem base is attacked instead
+local function jeemAround(bases, b)
+    if b.kind ~= "safehouse" then return nil end
+    for _, j in ipairs(bases) do
+        local r = j.rect
+        if j.kind == "jeem" and r and b.x >= r.x1 and b.x <= r.x2 and b.y >= r.y1 and b.y <= r.y2 then return j end
+    end
+end
+
+-- Pure, specs in tests/run.lua. The bases owns(b) accepts; A-Life homes never count, a siege needs a claimed base. A safehouse
+-- inside a Jeem base counts as that Jeem base (listed once)
 function Siege.candidates(bases, owns)
-    local out = {}
+    local out, seen = {}, {}
     for _, b in ipairs(bases) do
-        if b.kind ~= "home" and owns(b) then out[#out + 1] = b end
+        if b.kind ~= "home" and owns(b) then
+            b = jeemAround(bases, b) or b
+            if not seen[b] then seen[b], out[#out + 1] = true, b end
+        end
     end
     return out
 end
@@ -90,13 +104,25 @@ function Siege.split(total, k)
     return out
 end
 
--- up to n outdoor loaded squares about dist tiles from the base, one per direction round it; Spawn.suits keeps them off
--- protected ground. A direction with no loaded square is skipped, so the list may be shorter (or empty)
-function Siege.waveSquares(x, y, dist, n)
+-- Pure, specs in tests/run.lua. How far a ray from (x, y) at angle a (radians) runs before it leaves rect r ({ x1, y1, x2, y2 },
+-- inclusive tiles); 0 when there is no rect or (x, y) is outside it
+function Siege.edge(x, y, r, a)
+    if not r or x < r.x1 or x > r.x2 or y < r.y1 or y > r.y2 then return 0 end
+    local c, s, t = math.cos(a), math.sin(a), math.huge
+    if c > 1e-9 then t = math.min(t, (r.x2 + 1 - x) / c) elseif c < -1e-9 then t = math.min(t, (r.x1 - x) / c) end
+    if s > 1e-9 then t = math.min(t, (r.y2 + 1 - y) / s) elseif s < -1e-9 then t = math.min(t, (r.y1 - y) / s) end
+    return t
+end
+
+-- up to n outdoor loaded squares about dist tiles past the edge of rect (the base's zone; nil measures from x, y), one per
+-- direction round it; Spawn.suits keeps them off protected ground. A direction with no loaded square is skipped, so the list
+-- may be shorter (or empty)
+function Siege.waveSquares(x, y, dist, n, rect)
     local out = {}
     for _, deg in ipairs(Siege.spreadAngles(n, ZombRand)) do
         for try = 1, 15 do
-            local a, d = math.rad(deg + ZombRand(21) - 10), dist + try -- further out each try, past a big base's own zone
+            local a = math.rad(deg + ZombRand(21) - 10)
+            local d = Siege.edge(x, y, rect, a) + dist + try -- further out each try, past a neighbour's zone
             local sq = getCell():getGridSquare(math.floor(x + math.cos(a) * d), math.floor(y + math.sin(a) * d), 0)
             if sq and Spawn.suits(sq) then out[#out + 1] = sq; break end
         end
@@ -145,7 +171,7 @@ local function sendWave(run, o, player)
     local d = run.data
     local zom = d.waveType == "zombies"
     local k = zom and 3 or o.attackers < 3 and 1 or math.min(o.attackers, 4) -- D5: groups, each from its own side
-    local sqs = Siege.waveSquares(run.x, run.y, o.spawnDistance, k)
+    local sqs = Siege.waveSquares(run.x, run.y, o.spawnDistance, k, d.rect)
     if #sqs == 0 then
         SEM.Runner.status(run, d.base .. ": no clear ground for wave " .. (d.wave + 1) .. " yet, trying again")
         d.at = run.elapsed + 10
@@ -230,7 +256,7 @@ end
 local function overrun(run)
     local o, d = run.options, run.data
     local zom = d.waveType == "zombies"
-    local sqs = Siege.waveSquares(run.x, run.y, o.spawnDistance, 3)
+    local sqs = Siege.waveSquares(run.x, run.y, o.spawnDistance, 3, d.rect)
     for i, n in ipairs(#sqs > 0 and Siege.split(zom and Spawn.clamp(o.zombieAttackers) or o.attackers, #sqs) or {}) do
         if zom then
             -- a stand-in run: failing this one below does not drop its batches; standIn leaves them untagged, as nothing untags -run.id
