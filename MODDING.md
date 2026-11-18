@@ -3,7 +3,7 @@
 This guide is for Project Zomboid Build 42 modders. It shows how to add an event from your own mod, so Server Event
 Manager (SEM) schedules it, shows it in the admin console and runs it.
 
-Everything here was checked against SEM 0.3.0-beta. File names below are under
+Everything here was checked against SEM 0.5.1-beta. File names below are under
 `ServerEventManager/Contents/mods/ServerEventManager/42/media/lua/`. Where something could not be confirmed in SEM's code,
 the text says so.
 
@@ -66,12 +66,12 @@ event from it.
 ### Load order rules
 
 - Call `SEM.registerEvent` at file load, not inside an event callback. SEM reads the list of events when global ModData
-  loads (`Events.OnInitGlobalModData`, `server/SEM/Store.lua:564`).
+  loads (`Events.OnInitGlobalModData`, `Store.init` in `server/SEM/Store.lua`).
 - Set `SEM.Events[id]` at file load too, for the same reason. At that point SEM checks each modded event for a server
   module. A modded event with no module logs `[SEM] event '<id>' has no server module (SEM.Events.<id>); its settings are
   kept but it cannot run` and stays out of the console.
 - The console lists a modded event only after the server's snapshot carries settings for it
-  (`client/SEM/Console.lua:614-623`). A client that has your mod while the server does not shows nothing.
+  (`shown` in `client/SEM/Console.lua`). A client that has your mod while the server does not shows nothing.
 - The console works in multiplayer only (hosted or dedicated). Server commands do not reach a single-player game
   (`client/SEM/Open.lua:10`).
 
@@ -125,14 +125,16 @@ Types (`shared/SEM/Options.lua`, the `check` table):
 | `bool` | | `true` or `false` | tick box |
 | `int` | `min`, `max` | whole number in range | text box |
 | `float` | `min`, `max` | finite number in range | text box |
-| `string` | `maxLen` (default 200); `picker` = `"player"`, `"outfit"` or `"base"` | text up to `maxLen` bytes | text box, or Pick / Clear with a picker |
+| `string` | `maxLen` (default 200); `picker` = `"player"`, `"outfit"` or `"base"` (a safehouse, Jeem base or A-Life home id) | text up to `maxLen` bytes | text box, or Pick / Clear with a picker |
 | `enum` | `choices` (list), `labels` (map choice to shown text), `noRandom`, `randomFrom` (list) | one of `choices` | drop-down |
 | `location` | `optional` (no default needed) | `{ x, y, z }` whole numbers, z from -32 to 32 | x, y, z boxes and Map Pick |
-| `packList` | `picker` = `"lootPack"` (loot packs) or `"pack"` (vehicle packs) | list of up to 10 names, 1 to 40 characters each; duplicates dropped | Pick / Clear |
+| `packList` | `picker` = `"lootPack"` (loot packs), `"pack"` (vehicle packs) or `"weaponPack"` (weapon packs) | list of up to 10 names, 1 to 40 characters each; duplicates dropped | Pick / Clear |
 | `lootTable` | | list of up to 100 `{ item, chance 0-100, min, max <= 100 }` | **none** on an event page |
 | `vehicleList` | | list of up to 50 vehicle ids | **none** on an event page |
+| `weaponList` | | list of up to 50 weapon item ids | **none** on an event page |
 
-`lootTable` and `vehicleList` validate, but the event form has no control for them (`client/SEM/Form.lua:223-252`). Use a
+`lootTable`, `vehicleList` and `weaponList` validate, but the event form has no control for them (the field controls in
+`client/SEM/Form.lua`). Use a
 `packList` with a picker instead.
 
 A missing value is filled from `default`. An unknown key in a saved payload is an error.
@@ -141,7 +143,7 @@ A missing value is filled from `default`. An unknown key in a saved payload is a
 
 Every enum gets `"random"` first, shown as "Random", unless it has `noRandom = true`. When a run begins, each enum still set
 to `"random"` is replaced once with a pick from `randomFrom`, or from every other choice when there is no `randomFrom`
-(`Runner.resolveRandom`, `server/SEM/Runner.lua:416`). Your module never sees `"random"` for such an enum. The picks are
+(`Runner.resolveRandom`, `server/SEM/Runner.lua`). Your module never sees `"random"` for such an enum. The picks are
 appended to every status line as `(random: key=value)`.
 
 An enum's `default` may be `"random"` unless it has `noRandom`.
@@ -157,18 +159,20 @@ texts; `duration` is the default `durationMinutes`. `drop` is a set of keys to l
 
 | Group | Keys |
 | --- | --- |
-| Announcement | `title`, `showWarning` (default false), `message`, `leadMinutes` (0-60, default 0), `startMessage`, `soundOn`, `requireRadio` |
+| Announcement | `notifyOn` (default true), `title`, `showWarning` (default false), `message`, `leadMinutes` (0-60, default 0), `startMessage`, `soundOn`, `requireRadio` |
 | Map marker | `markerOn`, `markerExact`, `markerRadioExact`, `fuzzyRadius` |
 | Location | `locationMode`, `location`, `town`, `chosenPlayer`, `minAgeDays`, `avoidForest` |
-| General | `durationMinutes` (1-240) |
+| General | `durationMinutes` (1-240), `cleanUp` (Clean Up At End, default false) |
 
 SEM's runner reads these keys directly. What you may drop:
 
 - The Location keys, all of them, only with `ownSite = true` on the module (you pick the site in `start`).
 - `durationMinutes`, only with `endless = true` on the module. Otherwise `Runner.begin` refuses every start with "event has
-  no durationMinutes and is not endless" and logs it (`server/SEM/Runner.lua:479-483`). Registration cannot catch this,
+  no durationMinutes and is not endless" and logs it (`Runner.begin`). Registration cannot catch this,
   because only the server knows the module.
 - The Map marker keys, all of them: no marker is drawn.
+- `notifyOn`: then every notification is sent. With it, Off keeps the event quiet: no warning, start or later notices.
+- `cleanUp`: then nothing is removed at the end and `cleanup(run)` is never called.
 - Never `title`, `message`, `startMessage`, `leadMinutes`, `soundOn` or `requireRadio`: `registerEvent` refuses the
   definition.
 
@@ -177,7 +181,7 @@ Ready-made blocks, each a function `(group, showIf)` returning a list:
 | Builder | Keys | Use with |
 | --- | --- | --- |
 | `SEM.optionBlocks.lootFields(group, showIf)` | `lootPack` (packList, default `{ "Medium" }`) | `Spawn.placeCrates`, `Spawn.lootFor` |
-| `SEM.optionBlocks.guards(group)` | `guardType`, `guardCount`, `guardZombieMin/Max`, `guardNpcMin/Max`, `guardSprinterPct`, `guardRadius`, `npcTier`, `weaponPack`, `npcCount`, `guardLeash`, `npcDifficulty`, `extraPerPlayerPct` | `Spawn.siteGuards` |
+| `SEM.optionBlocks.guards(group)` | `guardType`, `guardCount`, `guardZombieMin/Max`, `guardNpcMin/Max`, `guardSprinterPct`, `guardRadius`, `npcTier`, `weaponPack`, `npcCount`, `guardLeash`, `npcDifficulty`, `extraPerPlayerPct`, `markHostiles` | `Spawn.siteGuards` |
 
 `guards` takes only `group`. Other builders the built-ins use (arrows, leave timer, NPC tier on its own) are not exposed.
 Write those fields yourself with the same keys if you want the behaviour they drive (section 4, "Optional module fields").
@@ -188,10 +192,10 @@ Write those fields yourself with the same keys if you want the behaviour they dr
 - Admins save other presets (up to 50, names 1-40 characters). A schedule runs either Default or one named preset of the
   same event.
 - When you add a new option in a later version of your mod, saved options and presets get its `default`. A saved value that
-  no longer validates is reset to the default; unknown keys are dropped (`cleanFields`, `server/SEM/Store.lua:58`).
+  no longer validates is reset to the default; unknown keys are dropped (`cleanFields`, `server/SEM/Store.lua`).
 - Per-player scaling: `extraPerPlayerPct` scales only these keys, if your event has them: `guardCount`, `size`, `count`,
   `zombies`, `fallbackCount`, `zombieAttackers` (cap 500) and `npcCount`, `groupSize`, `attackers`, `hunters` (cap 10)
-  (`server/SEM/Runner.lua:442`).
+  (`ZOMBIE_COUNTS` and `NPC_COUNTS`, `server/SEM/Runner.lua`).
 
 ## 4. The server module
 
@@ -206,12 +210,15 @@ States: `pending` -> `warning` (only when `showWarning` is on and `leadMinutes` 
 
 1. `Runner.begin` copies the options (preset or Default), resolves Random enums, scales counts, and checks the limit.
    Scheduled runs over `maxConcurrent` queue; Trigger Now always starts and is not counted.
-2. With lead time, all players get the warning banner (`message` + "Arrives in N min.").
+2. With lead time, all players get the warning banner (`message` + "Arrives in N min."). A module with `preview` may show
+   its site on the map now.
 3. When lead time ends, SEM picks the site (unless `ownSite`) into `run.x`, `run.y`, `run.z`, makes the marker, sets the
    state to `active`, and calls your `start(run)`.
-4. If `start` did not fail the run, SEM sends the marker and the start banner (`startMessage`).
+4. If `start` did not fail the run, SEM sends the marker and the start banner (`startMessage`). With `notifyOn` off, no
+   banner is sent.
 5. SEM calls `update(run)` on the game's `EveryOneMinute` event. How often that is in real seconds depends on the server's
-   day length (not set by SEM). `run.elapsed` counts **real** seconds, at most 120 per call.
+   day length (not set by SEM). `run.elapsed` counts **real** seconds, at most 120 per step. The time limit is checked
+   about once a real second, also while the game is paused.
 6. The run ends when `update` returns a reason, at the duration, on Cancel, or on `SEM.Runner.fail`. Then `stop(run, why)` is
    called.
 
@@ -276,7 +283,7 @@ The whole run table is stored in the world's global ModData (`ServerEventManager
 tables, numbers, text, booleans. Never Java objects (squares, zombies, players, items) and never functions. Keep
 coordinates and ids instead.
 
-After a restart (`Runner.init`, `server/SEM/Runner.lua:646`):
+After a restart (`Runner.init`, `server/SEM/Runner.lua`):
 
 | Run was | It becomes |
 | --- | --- |
@@ -313,11 +320,13 @@ next `update`, or use `due` to make that `update` come at once.
 | `endless = true` | No time limit. Ends only by `update`, fail or Cancel. You may drop `durationMinutes`. |
 | `timeUpFails = true` | Time up with `run.placed` fails instead of ending. |
 | `due(run)` | Called about once a real second while active. Return `true` to run `update` now. |
+| `preview(run)` | Called once as the warning starts (Lead Minutes). Return `x, y` to place the site and show the marker during the warning, or nil to wait for `start`. Save what you found in `run.data` for `start`. Under Siege uses it to show the base. |
 | `remaining(run)` | Return a list of `{ x, y }` targets left and a noun, e.g. `return points, "zombies"`. Drives direction arrows when the options have `arrowLeft` (> 0) and `arrowRange`, and the leave check when `run.placed` is set. |
 | `areaRange` | Tiles around the site and targets that count as "near" for the leave check. Default 100 (`SEM.Config.EVENT_AREA`). |
 
 The leave check: when no player is within `areaRange` of the site or any target, the run pauses (`update` is not called) until
-a player is near again. It never fails the run. Returning `nil` from `remaining` skips the check.
+a player is near again. The pause never fails the run by itself, but `run.elapsed` keeps counting, so the time limit still
+applies. Returning `nil` from `remaining` skips the check.
 
 Fields for the arrows, if you want them (copy of the built-ins' fields):
 
@@ -420,11 +429,11 @@ SEM.Runner.toAll("alert", { id = run.id, title = run.options.title, message = "S
     sound = run.options.soundOn, radio = run.options.requireRadio })
 ```
 
-With `radio = true` only players carrying a charged radio see it (`client/SEM/Alerts.lua:106`).
+With `radio = true` only players carrying a charged radio see it (`client/SEM/Alerts.lua`).
 
-For your own client code, pick a command name SEM does not use. SEM uses `alert`, `alertCancel`, `boom`, `configError`,
+For your own client code, pick a command name SEM does not use. SEM uses `alert`, `alertCancel`, `armed`, `armedAll`, `boom`, `configError`,
 `configExportPart`, `error`, `eventFeed`, `eventTags`, `eventTrack`, `flyover`, `markerAdd`, `markerExact`,
-`markerExactState`, `markerRemove`, `markerState`, `notice`, `snapshot`, `superState`. Prefix yours, e.g. `supplycache_ping`.
+`logAdd`, `markerExactState`, `markerRemove`, `markerState`, `notice`, `snapshot`, `superState`. Prefix yours, e.g. `supplycache_ping`.
 
 Server:
 
@@ -449,7 +458,7 @@ end)
 
 ## 7. Labels and translations
 
-The console looks up text with `getTextOrNull("UI_SEM_" .. key)` (`SEM.t`, `client/SEM/Theme.lua:22`):
+The console looks up text with `getTextOrNull("UI_SEM_" .. key)` (`SEM.t`, `client/SEM/Theme.lua`):
 
 | Text | Key | Fallback |
 | --- | --- | --- |
@@ -560,7 +569,7 @@ In game:
 9. Save a preset, make a schedule that uses it, and check the schedule's Next column.
 
 `luajit tests/run.lua` in SEM's repo is SEM's own spec runner. It covers the registration path with a fake event
-(`fakemod`, `tests/run.lua:4674-4802`) but it does not load your mod. You can copy its stubs if you want specs of your own.
+(`fakemod` in `tests/run.lua`) but it does not load your mod. You can copy its stubs if you want specs of your own.
 
 ## 10. Compatibility and limits
 

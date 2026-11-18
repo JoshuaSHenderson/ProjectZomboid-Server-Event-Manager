@@ -116,6 +116,16 @@ description=[img]https://raw.githubusercontent.com/JoshuaSHenderson/ProjectZombo
 description=
 description=[img]https://raw.githubusercontent.com/JoshuaSHenderson/ProjectZomboid-Server-Event-Manager/main/docs/screenshots/event-bar.png[/img]
 description=
+description=[h2]For modders: add your own event[/h2]
+description=Other mods can add events to the console. Put [b]require=\ServerEventManager[/b] in your mod.info, call [b]SEM.registerEvent({ id, title, options })[/b] from a shared Lua file, and write a server module with [b]start[/b], [b]update[/b] and [b]stop[/b]. Your event shows under [b]Modded Events[/b] and gets, with no extra code:
+description=[list]
+description=[*]An options page built from your option list, with presets and Trigger Now.
+description=[*]The Scheduler, queue and limits, like the built-in events.
+description=[*]Warnings, alerts, sounds, map markers, the event bar and Logs.
+description=[*]Runs saved across server restarts.
+description=[/list]
+description=If your mod is removed later, its saved settings are kept and come back when it returns. Full guide with a complete example: [url=https://github.com/JoshuaSHenderson/ProjectZomboid-Server-Event-Manager/blob/main/MODDING.md]MODDING.md on GitHub[/url].
+description=
 description=[h2]Notes[/h2]
 description=[list]
 description=[*]Build 42.21 or newer. Multiplayer servers only; the console is hidden in singleplayer.
