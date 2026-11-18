@@ -2,8 +2,9 @@
 SEM = SEM or {}
 
 SEM.News = {
-    version = "0.5.0-beta", -- keep equal to modversion in both mod.info files
+    version = "0.5.1-beta", -- keep equal to modversion in both mod.info files
     lines = {
+        "0.5.1-beta: Under Siege attacks the Jeem base around a safehouse, and waves start Spawn Distance past the base's edge, so large bases get their waves.",
         "0.5.0-beta: Location Mode is now Random, Random Countryside, Random Town, Random Player, Selected Town, Selected Player or Selected Location. Random Countryside is anywhere on the map outside towns.",
         "Random spots prefer a road. The new Minimum Distance From Players limit keeps random locations away from online players.",
         "Under Siege targets Random Player or Selected Player and attacks that player's own base.",

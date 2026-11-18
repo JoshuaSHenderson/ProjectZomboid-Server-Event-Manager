@@ -256,7 +256,7 @@ local EventDefs = {
             arrowField("Attackers"),
             arrowRange("Attackers"),
             markField("Attackers"),
-            { key = "spawnDistance", type = "int", min = 25, max = 60, default = 40, group = "Attackers", help = "How far from the base each wave starts, in tiles, then it marches in. 40 gives defenders time to get ready." },
+            { key = "spawnDistance", type = "int", min = 25, max = 60, default = 40, group = "Attackers", help = "How far past the edge of the base each wave starts, in tiles, then it marches in. 40 gives defenders time to get ready." },
             { key = "returnMinutes", type = "int", min = 1, max = 60, default = 5, group = "Defence", help = "Minutes players have to be at the base. The clock starts with the siege and again at each wave's warning. If nobody came within 100 tiles of the base by then, the wave attacks anyway and the siege fails." },
             { key = "takeover", type = "bool", default = true, group = "Defence", help = "When nobody defended the base: its loot is destroyed, fires start, and the enemies occupy it, all when a player next loads the base. This is the one thing that ignores safehouse protection." },
             { key = "lootLostPct", type = "int", min = 0, max = 100, default = 25, group = "Defence", showIf = { key = "takeover", equals = true }, help = "Percent of the items in the base's containers destroyed by a takeover, chosen at random. 0 destroys none." },

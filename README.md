@@ -3,7 +3,7 @@
 Project Zomboid Build 42 mod for multiplayer servers. It gives server admins an in-game console to set up,
 force, schedule and cancel server events: airdrops, hostile camps, migrating hordes, wildfires, super zombies, convoy
 wrecks, sieges, manhunts, rescue calls and aircraft crashes. Players get on-screen alerts, a sound and map markers. Mod id
-`ServerEventManager`, author JoshuaSHenderson, version 0.5.0-beta.
+`ServerEventManager`, author JoshuaSHenderson, version 0.5.1-beta.
 
 > **Beta, under active development. Expect bugs.** If you hit one, please
 > [open an issue](https://github.com/JoshuaSHenderson/ProjectZomboid-Server-Event-Manager/issues) with what you did and your `console.txt`.
@@ -243,14 +243,14 @@ the players there and may force entry. Zombie waves need no A-Life; they spawn a
 Migrating Horde.
 
 - **Target:** Target (Random Player or Selected Player), Selected Player (a player picker), Minimum Character Age in Days
-  for Random Player. The siege attacks that player's own safehouse or Jeem base (the nearest, if they have several). Random
+  for Random Player. The siege attacks that player's own safehouse or Jeem base (the nearest, if they have several; a safehouse inside a Jeem base counts as that Jeem base). Random
   Player only picks a player within 100 tiles of their base. A Selected Player must be online and waits until a player is near the base. A base with nobody online is
   never picked. Saves made with the old base targets become Random Player.
 - **Attackers:** Wave Type (NPC, Zombies or Random; default NPC; Random picks NPC or zombies each run, and zombies without
   A-Life), Attackers Per Wave (NPCs, 1 to 10, default 4), Zombie Attackers (1 to 500, default 40, capped by the zombie limit),
   Waves (1 to 6, default 2), Seconds Between Waves (10 to 1800, default 300, counted from when a wave is beaten), Wave Warning
   Seconds (5 to 120, default 30, between the "They are coming!" notice and the wave), NPC tier, Spawn Distance (25 to 60,
-  default 40).
+  default 40, measured from the edge of the base).
 - **Defence:** Return Minutes (1 to 60, default 5). The clock starts with the siege and again at each wave's warning. A player
   who comes within 100 tiles of the base before it runs out has defended that wave: there is no overrun, even if they leave
   again, and the wave waits for a player near the base (the siege can still fail at Duration, without a takeover). If nobody

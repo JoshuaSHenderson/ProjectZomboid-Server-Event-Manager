@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.1-beta
+
+2026-11-18. Under Siege on Jeem bases.
+
+### Fixed
+
+- Under Siege picked a safehouse inside a Jeem base (its centre was nearest the player), then found no unprotected ground in
+  reach for its waves and retried until Duration failed the siege. A safehouse inside a Jeem base now counts as that Jeem base.
+- Under Siege Spawn Distance is measured from the edge of the base, not its centre, so a base wider than the spawn ring still
+  gets its waves. The overrun spawn when nobody defends uses the same search.
+
 ## 0.5.0-beta
 
 2026-11-16. Where events land, and Under Siege by player.

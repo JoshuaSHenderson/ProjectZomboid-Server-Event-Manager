@@ -6,7 +6,10 @@ description=An in-game admin console for [b]Project Zomboid Build 42 multiplayer
 description=
 description=[b]This mod is in beta and under active development. Expect bugs.[/b] If something breaks, [url=https://github.com/JoshuaSHenderson/ProjectZomboid-Server-Event-Manager/issues]report it on GitHub[/url] or comment here, with what you did and your console.txt.
 description=
-description=[h2]New in 0.5.0-beta[/h2]
+description=[h2]New in 0.5.1-beta[/h2]
+description=[b]Under Siege fix.[/b] A safehouse inside a Jeem base is now attacked as that Jeem base, and waves start Spawn Distance past the edge of the base, not its centre. Large bases no longer leave a siege with nowhere to spawn its waves.
+description=
+description=[h2]0.5.0-beta[/h2]
 description=[list]
 description=[*][b]Location Modes.[/b] Random, Random Countryside, Random Town, Random Player, Selected Town, Selected Player and Selected Location. Random Countryside is anywhere on the map outside towns; Random Safehouse and Random Jeem Base are gone.
 description=[*][b]Near roads, away from players.[/b] Random spots prefer a road, and the new Minimum Distance From Players limit keeps them off online players.
